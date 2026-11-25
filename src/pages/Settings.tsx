@@ -186,7 +186,7 @@ function SettingsForm({ settings }: { settings: Settings }) {
       </div>
       {dirty && (
         <div className="sticky bottom-4 z-20 mt-6 flex flex-col gap-2 rounded-xl border border-line bg-surface p-3 shadow-[0_12px_32px_-8px_rgba(28,25,23,.25)] sm:flex-row sm:items-center sm:justify-between">
-          <span className="text-[13px] font-medium text-ink-2">Você tem alterações não salvas.</span>
+          <span className={error ? 'text-[13px] font-medium text-neg' : 'text-[13px] font-medium text-ink-2'}>{error ?? 'Você tem alterações não salvas.'}</span>
           <Button variant="primary" loading={saving} onClick={save}>Salvar configurações</Button>
         </div>
       )}
@@ -271,7 +271,7 @@ function DataCard() {
   };
 
   return (
-    <Card title="Seus dados" subtitle="Ficam salvos neste navegador, neste aparelho.">
+    <Card title="Seus dados" subtitle="Ficam só neste navegador, neste aparelho.">
       {storage.mode === 'memory' && (
         <Notice tone="neg" className="mb-3">
           Este navegador está bloqueando o armazenamento (modo anônimo ou bloqueio de cookies). Nada será salvo ao fechar.

@@ -6,6 +6,7 @@ import {
 import { useStore } from './lib/store.tsx';
 import { cx, Notice } from './components/ui.tsx';
 import { ErrorBoundary } from './components/ErrorBoundary.tsx';
+import { downloadBackup } from './lib/db-client.ts';
 import Dashboard from './pages/Dashboard.tsx';
 import Ingredients from './pages/Ingredients.tsx';
 import Recipes from './pages/Recipes.tsx';
@@ -86,7 +87,7 @@ function BackupFooter({ onNavigate }: { onNavigate?: () => void }) {
 }
 
 export default function App() {
-  const { loading, error, storage, reload, refreshStorage } = useStore();
+  const { loading, error, storage } = useStore();
   const [open, setOpen] = useState(false);
   const loc = useLocation();
   useEffect(() => {
@@ -126,9 +127,18 @@ export default function App() {
           <Notice tone="warn" className="sticky top-14 z-20 mb-5 lg:top-4">
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
               <span>{storage.blocked}</span>
-              <button className="shrink-0 rounded-md bg-ink px-3 py-1.5 text-[12.5px] font-medium text-white" onClick={() => window.location.reload()}>
-                Recarregar página
-              </button>
+              <div className="flex shrink-0 gap-2">
+                <button
+                  className="rounded-md border border-warn/30 bg-surface px-3 py-1.5 text-[12.5px] font-medium text-ink"
+                  onClick={() => void downloadBackup().catch(() => {})}
+                  title="Baixa os dados que estão nesta aba, antes de recarregar"
+                >
+                  Baixar cópia desta aba
+                </button>
+                <button className="rounded-md bg-ink px-3 py-1.5 text-[12.5px] font-medium text-white" onClick={() => window.location.reload()}>
+                  Recarregar página
+                </button>
+              </div>
             </div>
           </Notice>
         )}
@@ -139,7 +149,7 @@ export default function App() {
               {!storage.unreadable && (
                 <button
                   className="shrink-0 rounded-md border border-neg/30 bg-surface px-3 py-1.5 text-[12.5px] font-medium text-neg"
-                  onClick={() => void reload().then(refreshStorage)}
+                  onClick={() => window.location.reload()}
                 >
                   Tentar novamente
                 </button>

@@ -7,6 +7,13 @@ import { createApi, type ApiRequest, type ApiResponse } from '../../core/api.ts'
 import { backupBytesFrom, makeBackupJson } from '../../core/backup.ts';
 
 const IDB_NAME = 'doceria';
+/**
+ * Versão do IndexedDB. Subir a versão fecha as conexões de abas com código antigo
+ * (elas fecham ao receber "versionchange" e não conseguem reabrir), impedindo que uma aba
+ * desatualizada sobrescreva dados gravados por uma versão nova do sistema.
+ * 1 = sistema 1.0–1.2 · 2 = sistema 1.3+
+ */
+const IDB_VERSION = 2;
 const IDB_STORE = 'kv';
 const KEY_DB = 'database';
 const KEY_META = 'meta';
@@ -69,9 +76,13 @@ function idb(): Promise<IDBDatabase> {
   if (!idbPromise) {
     const p = new Promise<IDBDatabase>((resolve, reject) => {
       if (typeof indexedDB === 'undefined') return reject(new Error('IndexedDB indisponível'));
-      const req = indexedDB.open(IDB_NAME, 1);
-      req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
+      const req = indexedDB.open(IDB_NAME, IDB_VERSION);
+      req.onupgradeneeded = () => {
+        if (!req.result.objectStoreNames.contains(IDB_STORE)) req.result.createObjectStore(IDB_STORE);
+      };
+      let blockedTimer: ReturnType<typeof setTimeout> | undefined;
       req.onsuccess = () => {
+        if (blockedTimer) clearTimeout(blockedTimer);
         const db = req.result;
         const forget = () => {
           if (idbPromise === p) idbPromise = null;
@@ -85,7 +96,18 @@ function idb(): Promise<IDBDatabase> {
         resolve(db);
       };
       req.onerror = () => reject(req.error ?? new Error('Falha ao abrir o IndexedDB'));
-      req.onblocked = () => reject(new Error('IndexedDB bloqueado por outra aba'));
+      // "blocked": outra aba antiga ainda está fechando a conexão; a abertura continua sozinha.
+      // Se demorar, avisa para fechar as outras abas do sistema.
+      req.onblocked = () => {
+        blockedTimer = setTimeout(() => {
+          if (typeof window !== 'undefined')
+            window.dispatchEvent(
+              new CustomEvent(BLOCKED_EVENT, {
+                detail: 'Feche as outras abas ou janelas do sistema que estiverem abertas e recarregue esta página.',
+              }),
+            );
+        }, 4000);
+      };
     });
     idbPromise = p;
     p.catch(() => {
@@ -413,15 +435,24 @@ async function deliver(file: File): Promise<boolean> {
 export async function downloadBackup(): Promise<boolean> {
   await ensureReady();
   // Dentro da fila: usa o banco atual (já sincronizado com outras abas), nunca um fechado.
+  let fromBlockedTab = false;
   const bytes = await enqueue(async () => {
-    try {
-      if ((await syncWithStorage(state!)) === 'reloaded') notifyExternalChange();
-    } catch (e) {
-      if (state!.blocked) throw e;
+    if (state!.blocked) {
+      // Aba bloqueada (ex.: backup restaurado em outra aba): a cópia desta aba pode ser a única
+      // dos dados anteriores, então pode ser baixada mesmo assim.
+      fromBlockedTab = true;
+    } else {
+      try {
+        if ((await syncWithStorage(state!)) === 'reloaded') notifyExternalChange();
+      } catch {
+        fromBlockedTab = !!state!.blocked;
+      }
     }
     return state!.db.exportBytes();
   });
-  const ok = await deliver(makeBackupFile(bytes, `doceria-backup-${localDate()}.json`));
+  const name = fromBlockedTab ? `doceria-copia-desta-aba-${localDate()}.json` : `doceria-backup-${localDate()}.json`;
+  const ok = await deliver(makeBackupFile(bytes, name));
+  if (fromBlockedTab) return ok;
   if (ok) await setMeta({ lastBackupAt: new Date().toISOString() });
   return ok;
 }

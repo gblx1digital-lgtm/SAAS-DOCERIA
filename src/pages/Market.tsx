@@ -235,6 +235,7 @@ function MarketForm({ productId, defaultVariant, onClose }: { productId: number;
     price: !(price > 0) ? 'Informe o preço.' : null,
     source: !f.source.trim() ? 'Informe onde viu o preço (link, cardápio, visita…).' : null,
     variant: f.variantId === '' ? 'Escolha o tamanho equivalente.' : null,
+    observedAt: !f.observedAt ? 'Informe a data.' : null,
   };
   const valid = Object.values(errs).every((e) => !e);
 
@@ -280,7 +281,7 @@ function MarketForm({ productId, defaultVariant, onClose }: { productId: number;
         <Field label="Preço" error={touched ? errs.price : null}>
           <NumInput value={f.price} onChange={(v) => setF({ ...f, price: v })} prefix="R$" />
         </Field>
-        <Field label="Data em que viu">
+        <Field label="Data em que viu" error={touched ? errs.observedAt : null}>
           <Input type="date" value={f.observedAt} min="2000-01-01" max={todayISO()} onChange={(e) => setF({ ...f, observedAt: e.target.value })} />
         </Field>
         <Field label="Região / bairro">

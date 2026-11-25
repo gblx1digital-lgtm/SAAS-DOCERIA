@@ -57,7 +57,7 @@ Os minutos vêm do tempo de preparo das receitas (proporcional à fração usada
 
 ## Desenvolvimento
 
-Requer Node.js 20.19+ (ou 22.12+).
+Requer Node.js 20.19+ ou 22.12+ (os testes, `npm test`, precisam do 22.12+).
 
 ```bash
 npm install

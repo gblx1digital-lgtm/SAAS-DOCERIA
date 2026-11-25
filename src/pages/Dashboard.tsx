@@ -10,7 +10,14 @@ import { usePricingRows } from './Pricing.tsx';
 import { Button, Card, cx, Empty, Notice, PageHeader, Stat, useFeedback } from '../components/ui.tsx';
 import { downloadBackup } from '../lib/db-client.ts';
 
-/** iPhone/iPad no Safari: os dados ficam mais seguros no app da Tela de Início. */
+const isIOS = () =>
+  typeof navigator !== 'undefined' &&
+  (/iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1));
+const isStandalone = () =>
+  typeof matchMedia !== 'undefined' &&
+  (matchMedia('(display-mode: standalone)').matches || (navigator as Navigator & { standalone?: boolean }).standalone === true);
+
+/** iPhone/iPad: os dados ficam mais seguros no app da Tela de Início (e separados do Safari). */
 function InstallTip() {
   const { ingredients } = useStore();
   const [hidden, setHidden] = useState(() => {
@@ -20,15 +27,23 @@ function InstallTip() {
       return false;
     }
   });
-  if (typeof navigator === 'undefined' || hidden) return null;
-  const ios = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-  const standalone = matchMedia('(display-mode: standalone)').matches || (navigator as Navigator & { standalone?: boolean }).standalone === true;
-  if (!ios || standalone) return null;
+  if (!isIOS()) return null;
+  if (isStandalone()) {
+    // App da Tela de Início ainda vazio: explica como trazer o que foi cadastrado no Safari.
+    if (ingredients.length > 0) return null;
+    return (
+      <Notice className="mb-5">
+        Já usava o sistema pelo Safari? Os dados de lá não aparecem aqui sozinhos: no Safari, faça o backup em Custos e
+        configurações e, aqui, use <Link to="/configuracoes" className="font-medium underline">Restaurar backup</Link>.
+      </Notice>
+    );
+  }
+  if (hidden) return null;
   return (
     <Notice tone="warn" className="mb-5">
       <b>No iPhone, use o sistema pela Tela de Início.</b> Toque em Compartilhar → “Adicionar à Tela de Início” e abra pelo
-      ícone. No Safari, o iPhone pode apagar os dados após 7 dias sem uso
-      {ingredients.length > 0 ? ', e o app da Tela de Início começa vazio: faça um backup aqui e restaure lá' : ''}.{' '}
+      ícone. No Safari, o iPhone pode apagar os dados após 7 dias sem uso. O app da Tela de Início começa vazio: se já
+      cadastrou algo aqui, faça um backup e use “Restaurar backup” lá.{' '}
       <button
         className="font-medium underline"
         onClick={() => {
@@ -119,7 +134,7 @@ export default function Dashboard() {
       <PageHeader
         title={settings.businessName ? `Olá, ${settings.businessName}` : 'Painel'}
         description="Resumo financeiro e alertas da confeitaria."
-        actions={products.length > 0 && <Button variant="primary" icon={<Plus className="size-4" />} onClick={() => setSelling(true)}>Registrar venda</Button>}
+        actions={products.some((p) => p.active) && <Button variant="primary" icon={<Plus className="size-4" />} onClick={() => setSelling(true)}>Registrar venda</Button>}
       />
 
       <BackupReminder />

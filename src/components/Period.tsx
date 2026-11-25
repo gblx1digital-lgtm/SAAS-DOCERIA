@@ -33,6 +33,9 @@ function presetRange(p: string, t = todayISO()): { from: string; to: string; gra
 
 const KEY = 'doceria.period';
 
+/** Data inteira e plausível (o ano já foi digitado por completo). */
+const isComplete = (d: string) => /^\d{4}-\d{2}-\d{2}$/.test(d) && d >= '2000-01-01' && d <= '2099-12-31';
+
 interface Saved { preset: string; gran: Gran; from?: string; to?: string }
 
 /**
@@ -66,8 +69,10 @@ export function usePeriod(): [Period, (p: Period) => void] {
     };
   }, []);
 
-  const range =
+  let range =
     saved.preset === 'custom' && saved.from && saved.to ? { from: saved.from, to: saved.to } : presetRange(saved.preset, today);
+  // Período personalizado com as datas invertidas: usa na ordem certa.
+  if (range.from > range.to) range = { from: range.to, to: range.from };
   const period: Period = { preset: saved.preset, gran: saved.gran, from: range.from, to: range.to };
   const setPeriod = (p: Period) => setSaved({ preset: p.preset, gran: p.gran, ...(p.preset === 'custom' ? { from: p.from, to: p.to } : {}) });
   return [period, setPeriod];
@@ -88,40 +93,38 @@ export function PeriodPicker({ value, onChange }: { value: Period; onChange: (p:
       </Select></div>
       {value.preset === 'custom' && (
         <>
-          <div className="w-[150px]">
-            <Input
-              type="date"
-              value={value.from}
-              min="2000-01-01"
-              max={value.to}
-              aria-label="De"
-              onChange={(e) => {
-                const from = e.target.value;
-                if (!from) return;
-                // Nunca deixa o início depois do fim.
-                onChange({ ...value, from, to: from > value.to ? from : value.to });
-              }}
-            />
-          </div>
-          <div className="w-[150px]">
-            <Input
-              type="date"
-              value={value.to}
-              min={value.from}
-              aria-label="Até"
-              onChange={(e) => {
-                const to = e.target.value;
-                if (!to) return;
-                onChange({ ...value, to, from: to < value.from ? to : value.from });
-              }}
-            />
-          </div>
+          <DateField label="De" value={value.from} onCommit={(from) => onChange({ ...value, from })} />
+          <DateField label="Até" value={value.to} onCommit={(to) => onChange({ ...value, to })} />
         </>
       )}
       <Segmented
         value={value.gran}
         onChange={(gran) => onChange({ ...value, gran })}
         options={[{ value: 'day', label: 'Dia' }, { value: 'week', label: 'Semana' }, { value: 'month', label: 'Mês' }]}
+      />
+    </div>
+  );
+}
+
+/**
+ * Campo de data que só aplica a data quando ela está completa. Enquanto o ano é digitado,
+ * o navegador manda datas parciais (0002, 0020…), que ficam só no campo.
+ */
+function DateField({ label, value, onCommit }: { label: string; value: string; onCommit: (v: string) => void }) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => setDraft(value), [value]);
+  return (
+    <div className="w-[150px]">
+      <Input
+        type="date"
+        value={draft}
+        min="2000-01-01"
+        max="2099-12-31"
+        aria-label={label}
+        onChange={(e) => {
+          setDraft(e.target.value);
+          if (isComplete(e.target.value)) onCommit(e.target.value);
+        }}
       />
     </div>
   );

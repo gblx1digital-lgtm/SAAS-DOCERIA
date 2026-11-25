@@ -247,6 +247,10 @@ export function TxForm({ kind, initial, onClose, onSaved }: { kind: FormKind; in
   const { products, ingredients, settings, ctx } = useStore();
   const { toast } = useFeedback();
   const activeProducts = products.filter((p) => p.active || p.id === initial?.productId);
+  const feeFromSettings = (method: PaymentMethod | null, value: number) => {
+    const pct = method === 'pix' ? settings.feePixPct : method === 'debito' ? settings.feeDebitPct : method === 'credito' ? settings.feeCreditPct : 0;
+    return Math.round(value * pct) / 100;
+  };
   /** Venda cujo produto/tamanho foi excluído do cadastro: mantém o que foi gravado. */
   const orphan = kind === 'venda' && !!initial && initial.variantId === null;
 
@@ -271,7 +275,10 @@ export function TxForm({ kind, initial, onClose, onSaved }: { kind: FormKind; in
       paymentMethod: (initial?.paymentMethod ?? 'pix') as PaymentMethod,
       fee: initial ? toField(initial.fee) : '',
       /** auto = % das configurações; scaled = taxa gravada proporcional ao novo valor; manual = digitada. */
-      feeMode: (initial ? 'scaled' : 'auto') as 'auto' | 'scaled' | 'manual',
+      feeMode: (initial && Math.abs(initial.fee - feeFromSettings(initial.paymentMethod, initial.amount)) > 0.005 ? 'scaled' : 'auto') as
+        | 'auto'
+        | 'scaled'
+        | 'manual',
       ingredientId: (initial?.ingredientId ?? '') as number | '',
       updateIngredient: initial ? !!initial.purchase : true,
       packs: toField(initial?.purchase?.packs ?? ing0?.packs ?? 1),
@@ -291,11 +298,11 @@ export function TxForm({ kind, initial, onClose, onSaved }: { kind: FormKind; in
   const pickProduct = (id: number) => {
     const p = products.find((x) => x.id === id);
     const v = p?.variants[0];
-    set({ productId: id, variantId: v?.id ?? '', unitPrice: v?.salePrice ? toField(v.salePrice) : f.unitPrice, totalEdited: false });
+    set({ productId: id, variantId: v?.id ?? '', unitPrice: v?.salePrice ? toField(v.salePrice) : '', totalEdited: false });
   };
   const pickVariant = (id: number) => {
     const v = product?.variants.find((x) => x.id === id);
-    set({ variantId: id, unitPrice: v?.salePrice ? toField(v.salePrice) : f.unitPrice, totalEdited: false });
+    set({ variantId: id, unitPrice: v?.salePrice ? toField(v.salePrice) : '', totalEdited: false });
   };
   const pickIngredient = (id: number | '') => {
     const ing = id === '' ? undefined : ctx.ingredients.get(id);
@@ -404,7 +411,9 @@ export function TxForm({ kind, initial, onClose, onSaved }: { kind: FormKind; in
               gravado na época da venda é mantido.
             </Notice>
           ) : noProducts ? (
-            <Notice tone="warn" className="sm:col-span-2">Cadastre um produto antes de registrar vendas.</Notice>
+            <Notice tone="warn" className="sm:col-span-2">
+              {products.length ? 'Nenhum produto ativo. Ative um produto em Produtos para registrar vendas.' : 'Cadastre um produto antes de registrar vendas.'}
+            </Notice>
           ) : (
             <>
               <Field label="Produto" error={touched ? errs.product : null}>
