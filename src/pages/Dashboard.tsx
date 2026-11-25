@@ -1,13 +1,52 @@
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { AlertTriangle, ArrowRight, Check, Clock, Plus, TrendingUp } from 'lucide-react';
+import { AlertTriangle, ArrowRight, Check, Clock, Download, Plus, TrendingUp } from 'lucide-react';
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { useStore } from '../lib/store.tsx';
 import { date, money, moneyPrecise, number, pct, qtyBase } from '../lib/format.ts';
 import { bucketLabel, PeriodPicker, usePeriod } from '../components/Period.tsx';
 import { useFinance, TxForm } from './Finance.tsx';
 import { usePricingRows } from './Pricing.tsx';
-import { Button, Card, cx, Empty, Notice, PageHeader, Stat } from '../components/ui.tsx';
+import { Button, Card, cx, Empty, Notice, PageHeader, Stat, useFeedback } from '../components/ui.tsx';
+import { downloadBackup } from '../lib/db-client.ts';
+
+function BackupReminder() {
+  const { storage, ingredients, refreshStorage } = useStore();
+  const { toast } = useFeedback();
+  const [busy, setBusy] = useState(false);
+  if (storage.mode !== 'browser' || ingredients.length === 0) return null;
+  const last = storage.lastBackupAt ? new Date(storage.lastBackupAt).getTime() : 0;
+  const days = last ? Math.floor((Date.now() - last) / 864e5) : null;
+  if (days !== null && days < 7) return null;
+  return (
+    <Notice tone="warn" className="mb-5">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <span>
+          {days === null ? 'Você ainda não fez nenhum backup.' : `Seu último backup foi há ${days} dias.`} Os dados ficam só neste
+          navegador: guarde uma cópia no Drive, e-mail ou WhatsApp.
+        </span>
+        <Button
+          size="sm"
+          icon={<Download className="size-3.5" />}
+          loading={busy}
+          onClick={async () => {
+            setBusy(true);
+            try {
+              if (await downloadBackup()) toast('Backup gerado.');
+              await refreshStorage();
+            } catch (e) {
+              toast((e as Error).message, 'neg');
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          Fazer backup agora
+        </Button>
+      </div>
+    </Notice>
+  );
+}
 
 export default function Dashboard() {
   const { settings, ingredients, recipes, products, reload } = useStore();
@@ -45,6 +84,7 @@ export default function Dashboard() {
         actions={products.length > 0 && <Button variant="primary" icon={<Plus className="size-4" />} onClick={() => setSelling(true)}>Registrar venda</Button>}
       />
 
+      <BackupReminder />
       {!setupDone && (
         <Card className="mb-5" title="Primeiros passos" subtitle="Siga a ordem: o sistema usa cada etapa para calcular a próxima.">
           <ol className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">

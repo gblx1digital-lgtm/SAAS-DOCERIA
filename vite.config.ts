@@ -4,10 +4,7 @@ import tailwindcss from '@tailwindcss/vite';
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
-  server: {
-    port: 5173,
-    proxy: { '/api': 'http://localhost:3001' },
-  },
-  build: { outDir: 'dist', chunkSizeWarningLimit: 900 },
+  server: { port: 5173 },
+  build: { outDir: 'dist', chunkSizeWarningLimit: 1200, assetsInlineLimit: 0 },
   test: { environment: 'node', include: ['tests/**/*.test.ts'] },
 } as any);

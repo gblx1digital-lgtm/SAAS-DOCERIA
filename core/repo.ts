@@ -84,6 +84,23 @@ function recordHistory(db: DB, id: number, i: IngredientInput) {
   ).run(id, i.totalPrice, i.packageSize, i.packs, i.unit, costPerBase(i), i.lastPurchaseDate);
 }
 
+/** Registra uma compra antiga apenas no histórico (não muda o preço atual). */
+export function addPriceHistory(
+  db: DB,
+  id: number,
+  p: { totalPrice: number; packageSize: number; packs: number; unit: Unit; purchaseDate: string },
+) {
+  const ing = getIngredient(db, id);
+  const base = (u: string) => (u === 'kg' || u === 'g' ? 'g' : u === 'l' || u === 'ml' ? 'ml' : 'un');
+  if (base(p.unit) !== base(ing.unit))
+    throw new Conflict(`Unidade "${p.unit}" incompatível com "${ing.name}" (comprado em ${ing.unit}).`);
+  db.prepare(
+    `INSERT INTO ingredient_price_history
+     (ingredient_id, total_price, package_size, packs, unit, cost_per_base, purchase_date)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(id, p.totalPrice, p.packageSize, p.packs, p.unit, costPerBase(p), p.purchaseDate);
+}
+
 export function createIngredient(db: DB, i: IngredientInput): Ingredient {
   assertUniqueIngredientName(db, i.name);
   return tx(db, () => {

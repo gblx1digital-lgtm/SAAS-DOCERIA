@@ -3,6 +3,34 @@
 Sistema para confeitarias cadastrarem ingredientes, receitas e produtos, descobrirem
 quanto custa produzir cada doce e quanto cobrar, e acompanharem vendas e despesas.
 
+Roda **100% no navegador**: é um site estático (pronto para o Netlify) com um banco de dados
+SQLite (WebAssembly) salvo no próprio aparelho. Não precisa de servidor nem de login,
+e os dados não saem do aparelho.
+
+## Publicar no Netlify
+
+```bash
+npm install
+npm run package
+```
+
+Isso gera `doceria-netlify.zip`. No Netlify, entre na sua conta, vá em **Sites → Add new site →
+Deploy manually** e arraste o arquivo (ou a pasta `dist/`). Para atualizar depois, abra o site no
+Netlify → **Deploys** e arraste o novo arquivo.
+
+Também funciona conectando este repositório no Netlify (o `netlify.toml` já configura o build).
+
+## Onde ficam os dados
+
+- No navegador de cada aparelho (IndexedDB). Cada alteração é gravada na hora.
+- Computador e celular têm dados **separados**. Para levar de um para o outro:
+  *Custos e configurações → Fazer backup* num aparelho e *Restaurar backup* no outro.
+- O backup é um arquivo `.json` (contém o banco SQLite completo). No celular abre o menu de
+  compartilhar (Arquivos, Drive, WhatsApp, e-mail).
+- Se o navegador for limpo, os dados somem: faça backups com frequência. O painel lembra
+  quando o último backup tem mais de 7 dias.
+- O endereço importa: `seusite.netlify.app` e um domínio próprio guardam dados separados.
+
 ## Módulos
 
 | Módulo | O que faz |
@@ -27,44 +55,29 @@ lucro/un  = preço × (1 − taxa% − imposto%) − custo
 A margem é o lucro líquido sobre o preço de venda, além do seu pró-labore (que já está no custo).
 Os minutos vêm do tempo de preparo das receitas (proporcional à fração usada) mais o tempo extra do produto.
 
-## Rodando
+## Desenvolvimento
 
-Requer **Node.js 22.13+** (usa o SQLite embutido do Node — sem dependências nativas).
+Requer Node.js 20.11+.
 
 ```bash
 npm install
-npm run build
-npm start          # http://localhost:3001
+npm run dev        # http://localhost:5173
+npm test           # testes dos cálculos, da API local e do backup
+npm run build      # gera dist/
+npm run preview    # serve dist/ localmente
 ```
-
-Desenvolvimento (API + interface com recarregamento automático):
-
-```bash
-npm run dev        # interface em http://localhost:5173
-```
-
-Testes dos cálculos e da API:
-
-```bash
-npm test
-```
-
-### Dados
-
-Ficam em `data/doceria.db` (SQLite). Para mudar o local: `DB_PATH=/caminho/doceria.db npm start`.
-Faça backup copiando esse arquivo ou pelo botão **Backup (JSON)** em *Custos e configurações*.
-
-### Publicar na internet
-
-Qualquer hospedagem Node com disco persistente (Railway, Render com disco, Fly.io com volume, VPS).
-Configure `PORT`, `DB_PATH` apontando para o volume persistente, e rode `npm run build && npm start`.
-O sistema não tem login: se for publicar, coloque-o atrás de uma proteção de acesso (ex.: senha no proxy/hospedagem).
 
 ## Arquitetura
 
 ```
-shared/   tipos e motor de cálculo (usado pelo servidor e pela interface)
-server/   Express + SQLite (node:sqlite), validação com Zod, painel agregado
-src/      React + Vite + Tailwind + Recharts
-tests/    Vitest (cálculos e API)
+shared/   tipos e motor de cálculo
+core/     banco (SQLite via sql.js), regras de negócio, validação (Zod) e API local
+src/      interface React + Vite + Tailwind + Recharts; db-client.ts salva o banco no IndexedDB
+tests/    Vitest (cálculos, API e backup, no mesmo motor SQLite do navegador)
+scripts/  package.mjs gera o .zip para o Netlify
 ```
+
+A interface conversa com `core/api.ts` como se fosse uma API HTTP, mas tudo roda no navegador.
+Cada alteração roda numa transação (tudo ou nada) e o banco inteiro é gravado no IndexedDB
+antes de a tela confirmar. Abas abertas ao mesmo tempo se sincronizam (BroadcastChannel +
+Web Locks), e dados salvos que não puderem ser abertos nunca são sobrescritos automaticamente.

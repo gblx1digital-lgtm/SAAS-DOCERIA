@@ -161,3 +161,21 @@ describe('mercado', () => {
     expect(adv.status).toBe('margem_apertada');
   });
 });
+
+import { parseNum } from '../src/lib/format.ts';
+
+describe('números digitados (padrão brasileiro)', () => {
+  it('interpreta vírgula decimal e ponto de milhar', () => {
+    expect(parseNum('12,50')).toBe(12.5);
+    expect(parseNum('1.000')).toBe(1000);
+    expect(parseNum('12.500')).toBe(12500);
+    expect(parseNum('1.250,75')).toBe(1250.75);
+    expect(parseNum('R$ 7,90')).toBe(7.9);
+    expect(parseNum('0.395')).toBe(0.395);
+    expect(parseNum('1.5')).toBe(1.5);
+    expect(parseNum('395')).toBe(395);
+    expect(parseNum('')).toBeNaN();
+    expect(parseNum('abc')).toBeNaN();
+    expect(parseNum('1,2,3')).toBeNaN();
+  });
+});

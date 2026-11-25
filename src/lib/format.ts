@@ -49,14 +49,18 @@ export function addDays(iso: string, days: number) {
   return d.toISOString().slice(0, 10);
 }
 
-/** Converte texto digitado ("12,50") em número. Retorna NaN se inválido. */
+/**
+ * Converte texto digitado no padrão brasileiro em número. Retorna NaN se inválido.
+ * "12,50" → 12.5 · "1.000" → 1000 · "1.250,75" → 1250.75 · "0.395" → 0.395 · "1.5" → 1.5
+ */
 export function parseNum(s: string | number | null | undefined): number {
   if (typeof s === 'number') return s;
   if (s === null || s === undefined) return NaN;
-  const t = s.trim().replace(/\s/g, '').replace(/R\$/i, '');
+  let t = s.trim().replace(/\s/g, '').replace(/R\$/i, '');
   if (!t) return NaN;
-  const normalized = t.includes(',') ? t.replace(/\./g, '').replace(',', '.') : t;
-  return /^-?\d*\.?\d+$/.test(normalized) ? Number(normalized) : NaN;
+  if (t.includes(',')) t = t.replace(/\./g, '').replace(',', '.');
+  else if (/^-?[1-9]\d{0,2}(\.\d{3})+$/.test(t)) t = t.replace(/\./g, ''); // ponto como separador de milhar
+  return /^-?\d*\.?\d+$/.test(t) ? Number(t) : NaN;
 }
 
 /** Número → texto para campo editável (12.5 → "12,5"). */

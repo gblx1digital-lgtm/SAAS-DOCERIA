@@ -1,8 +1,7 @@
-import express, { type NextFunction, type Request, type Response } from 'express';
 import { z, ZodError } from 'zod';
-import type { DB } from './db.ts';
+import { tx, type DB } from './db.ts';
 import * as repo from './repo.ts';
-import { CalcError, indexById, round2, safeVariantCost, costPerBase } from '../shared/calc.ts';
+import { CalcError, indexById, round2, safeVariantCost } from '../shared/calc.ts';
 import {
   TX_CATEGORY_TYPE,
   type PaymentMethod,
@@ -158,8 +157,8 @@ const txSchema = z.discriminatedUnion('category', [
 
 // ───────── Helpers ─────────
 
-function parseId(req: Request): number {
-  const r = id.safeParse(req.params.id);
+function parseId(raw: string | undefined): number {
+  const r = id.safeParse(raw);
   if (!r.success) throw new repo.NotFound('Registro');
   return r.data;
 }
@@ -177,71 +176,103 @@ function calcCtx(db: DB) {
   };
 }
 
-type Handler = (req: Request, res: Response) => unknown;
-const h = (fn: Handler) => (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const out = fn(req, res);
-    if (!res.headersSent) res.json(out ?? { ok: true });
-  } catch (e) {
-    next(e);
+// ───────── Roteador ─────────
+
+export type Method = 'GET' | 'POST' | 'PUT' | 'DELETE';
+
+export interface ApiRequest {
+  method: Method;
+  path: string;
+  query?: Record<string, string>;
+  body?: unknown;
+}
+
+export interface ApiResponse {
+  status: number;
+  body: unknown;
+}
+
+interface Ctx {
+  params: Record<string, string>;
+  query: Record<string, string>;
+  body: unknown;
+}
+
+interface Route {
+  method: Method;
+  pattern: RegExp;
+  keys: string[];
+  status: number;
+  handler: (c: Ctx) => unknown;
+}
+
+export function errorResponse(err: unknown): ApiResponse {
+  if (err instanceof ZodError) {
+    const issue = err.issues[0];
+    return { status: 400, body: { error: issue?.message ?? 'Dados inválidos.', field: issue?.path.join('.'), issues: err.issues } };
   }
-};
+  if (err instanceof repo.NotFound) return { status: 404, body: { error: err.message } };
+  if (err instanceof repo.Conflict || err instanceof CalcError) return { status: 409, body: { error: err.message } };
+  const msg = err instanceof Error ? err.message : String(err);
+  if (/FOREIGN KEY/i.test(msg)) return { status: 409, body: { error: 'Registro em uso por outro cadastro.' } };
+  if (/UNIQUE constraint failed: index 'ingredients_name'/i.test(msg))
+    return { status: 409, body: { error: 'Já existe um ingrediente com este nome.' } };
+  console.error(err);
+  return { status: 500, body: { error: 'Erro interno. Tente novamente.' } };
+}
 
-// ───────── Rotas ─────────
+export function createApi(db: DB): (req: ApiRequest) => ApiResponse {
+  const routes: Route[] = [];
+  const add = (method: Method, path: string, handler: (c: Ctx) => unknown, status = 200) => {
+    const keys: string[] = [];
+    const pattern = new RegExp(
+      '^' +
+        path.replace(/:(\w+)/g, (_m, k: string) => {
+          keys.push(k);
+          return '([^/]+)';
+        }) +
+        '/?$',
+    );
+    routes.push({ method, pattern, keys, status, handler });
+  };
 
-export function createApi(db: DB) {
-  const r = express.Router();
-  r.use(express.json({ limit: '1mb' }));
-
-  r.get('/health', h(() => ({ ok: true })));
+  add('GET', '/health', () => ({ ok: true }));
 
   // Configurações
-  r.get('/settings', h(() => repo.getSettings(db)));
-  r.put('/settings', h((req) => repo.saveSettings(db, settingsSchema.parse(req.body) as Settings)));
+  add('GET', '/settings', () => repo.getSettings(db));
+  add('PUT', '/settings', (c) => repo.saveSettings(db, settingsSchema.parse(c.body) as Settings));
 
   // Ingredientes
-  r.get('/ingredients', h(() => repo.listIngredients(db)));
-  r.get('/ingredients/history', h(() => repo.allHistory(db)));
-  r.get('/ingredients/:id/history', h((req) => repo.ingredientHistory(db, parseId(req))));
-  r.post('/ingredients', h((req, res) => {
-    res.status(201);
-    return repo.createIngredient(db, ingredientSchema.parse(req.body));
-  }));
-  r.put('/ingredients/:id', h((req) => repo.updateIngredient(db, parseId(req), ingredientSchema.parse(req.body))));
-  r.delete('/ingredients/:id', h((req) => repo.deleteIngredient(db, parseId(req))));
+  add('GET', '/ingredients', () => repo.listIngredients(db));
+  add('GET', '/ingredients/history', () => repo.allHistory(db));
+  add('GET', '/ingredients/:id/history', (c) => repo.ingredientHistory(db, parseId(c.params.id)));
+  add('POST', '/ingredients', (c) => repo.createIngredient(db, ingredientSchema.parse(c.body)), 201);
+  add('PUT', '/ingredients/:id', (c) => repo.updateIngredient(db, parseId(c.params.id), ingredientSchema.parse(c.body)));
+  add('DELETE', '/ingredients/:id', (c) => repo.deleteIngredient(db, parseId(c.params.id)));
 
   // Receitas
-  r.get('/recipes', h(() => repo.listRecipes(db)));
-  r.post('/recipes', h((req, res) => {
-    res.status(201);
-    return repo.createRecipe(db, recipeSchema.parse(req.body) as repo.RecipeInput);
-  }));
-  r.put('/recipes/:id', h((req) => repo.updateRecipe(db, parseId(req), recipeSchema.parse(req.body) as repo.RecipeInput)));
-  r.delete('/recipes/:id', h((req) => repo.deleteRecipe(db, parseId(req))));
+  add('GET', '/recipes', () => repo.listRecipes(db));
+  add('POST', '/recipes', (c) => repo.createRecipe(db, recipeSchema.parse(c.body) as repo.RecipeInput), 201);
+  add('PUT', '/recipes/:id', (c) => repo.updateRecipe(db, parseId(c.params.id), recipeSchema.parse(c.body) as repo.RecipeInput));
+  add('DELETE', '/recipes/:id', (c) => repo.deleteRecipe(db, parseId(c.params.id)));
 
   // Produtos
-  r.get('/products', h(() => repo.listProducts(db)));
-  r.post('/products', h((req, res) => {
-    res.status(201);
-    return repo.createProduct(db, productSchema.parse(req.body) as repo.ProductInput);
-  }));
-  r.put('/products/:id', h((req) => repo.updateProduct(db, parseId(req), productSchema.parse(req.body) as repo.ProductInput)));
-  r.delete('/products/:id', h((req) => repo.deleteProduct(db, parseId(req))));
+  add('GET', '/products', () => repo.listProducts(db));
+  add('POST', '/products', (c) => repo.createProduct(db, productSchema.parse(c.body) as repo.ProductInput), 201);
+  add('PUT', '/products/:id', (c) => repo.updateProduct(db, parseId(c.params.id), productSchema.parse(c.body) as repo.ProductInput));
+  add('DELETE', '/products/:id', (c) => repo.deleteProduct(db, parseId(c.params.id)));
 
   // Mercado
-  r.get('/market', h(() => repo.listMarket(db)));
-  r.post('/market', h((req, res) => {
-    res.status(201);
-    return repo.createMarket(db, marketSchema.parse(req.body) as repo.MarketInput);
-  }));
-  r.delete('/market/:id', h((req) => repo.deleteMarket(db, parseId(req))));
+  add('GET', '/market', () => repo.listMarket(db));
+  add('POST', '/market', (c) => repo.createMarket(db, marketSchema.parse(c.body) as repo.MarketInput), 201);
+  add('DELETE', '/market/:id', (c) => repo.deleteMarket(db, parseId(c.params.id)));
 
   // Financeiro
-  r.get('/transactions', h((req) => {
-    const from = typeof req.query.from === 'string' ? isoDate.parse(req.query.from) : undefined;
-    const to = typeof req.query.to === 'string' ? isoDate.parse(req.query.to) : undefined;
+  add('GET', '/transactions', (c) => {
+    const from = c.query.from !== undefined ? isoDate.parse(c.query.from) : undefined;
+    const to = c.query.to !== undefined ? isoDate.parse(c.query.to) : undefined;
     return repo.listTransactions(db, from, to);
-  }));
+  });
 
   const buildTx = (body: unknown, existingId?: number): repo.TxInput => {
     const t = txSchema.parse(body) as any;
@@ -274,10 +305,12 @@ export function createApi(db: DB) {
         if (error) throw new repo.Conflict(`Não foi possível calcular o custo do produto: ${error}`);
         unitCost = cost!.breakdown.total;
       }
+      const fee = t.fee ?? feeFor(t.paymentMethod, t.amount, settings);
+      if (fee > t.amount) throw new repo.Conflict('A taxa não pode ser maior que o valor da venda.');
       return {
         ...base,
         description: t.description || `${product.name} · ${variant.name}`,
-        fee: t.fee ?? feeFor(t.paymentMethod, t.amount, settings),
+        fee,
         productId: product.id,
         variantId: variant.id,
         quantity: t.quantity,
@@ -297,74 +330,66 @@ export function createApi(db: DB) {
     return base;
   };
 
-  const applyIngredientUpdate = (body: any, date: string, amount: number) => {
-    if (body?.category !== 'compra_ingrediente' || !body.updateIngredient || !body.ingredientId) return;
-    const ing = repo.getIngredient(db, Number(body.ingredientId));
-    const u = txSchema.parse(body) as any;
-    repo.updateIngredient(db, ing.id, {
-      ...ing,
-      totalPrice: amount,
-      lastPurchaseDate: date > ing.lastPurchaseDate ? date : ing.lastPurchaseDate,
-      packageSize: u.updateIngredient.packageSize,
-      packs: u.updateIngredient.packs,
-      unit: u.updateIngredient.unit,
-    });
+  /**
+   * Compra com "atualizar preço": a compra mais recente vira o preço atual do ingrediente.
+   * Compras com data anterior à última registrada entram só no histórico.
+   */
+  const applyIngredientUpdate = (body: unknown, t: repo.TxInput) => {
+    const parsed = txSchema.parse(body) as any;
+    if (parsed.category !== 'compra_ingrediente' || !parsed.updateIngredient || !parsed.ingredientId) return;
+    const ing = repo.getIngredient(db, parsed.ingredientId);
+    const purchase = {
+      totalPrice: t.amount,
+      packageSize: parsed.updateIngredient.packageSize,
+      packs: parsed.updateIngredient.packs,
+      unit: parsed.updateIngredient.unit,
+    };
+    if (t.date >= ing.lastPurchaseDate) {
+      repo.updateIngredient(db, ing.id, { ...ing, ...purchase, lastPurchaseDate: t.date });
+    } else {
+      repo.addPriceHistory(db, ing.id, { ...purchase, purchaseDate: t.date });
+    }
   };
 
-  r.post('/transactions', h((req, res) => {
-    const t = buildTx(req.body);
-    applyIngredientUpdate(req.body, t.date, t.amount);
-    res.status(201);
+  add('POST', '/transactions', (c) => {
+    const t = buildTx(c.body);
+    applyIngredientUpdate(c.body, t);
     return repo.createTransaction(db, t);
-  }));
-  r.put('/transactions/:id', h((req) => {
-    const txId = parseId(req);
-    const t = buildTx(req.body, txId);
-    applyIngredientUpdate(req.body, t.date, t.amount);
+  }, 201);
+  add('PUT', '/transactions/:id', (c) => {
+    const txId = parseId(c.params.id);
+    const t = buildTx(c.body, txId);
+    applyIngredientUpdate(c.body, t);
     return repo.updateTransaction(db, txId, t);
-  }));
-  r.delete('/transactions/:id', h((req) => repo.deleteTransaction(db, parseId(req))));
+  });
+  add('DELETE', '/transactions/:id', (c) => repo.deleteTransaction(db, parseId(c.params.id)));
 
   // Painel
-  r.get('/dashboard', h((req) => {
-    const from = isoDate.parse(req.query.from);
-    const to = isoDate.parse(req.query.to);
+  add('GET', '/dashboard', (c) => {
+    const from = isoDate.parse(c.query.from);
+    const to = isoDate.parse(c.query.to);
     if (from > to) throw new repo.Conflict('A data inicial deve ser anterior à final.');
-    const gran = z.enum(['day', 'week', 'month']).catch('day').parse(req.query.granularity);
+    const gran = z.enum(['day', 'week', 'month']).catch('day').parse(c.query.granularity);
     return buildDashboard(db, from, to, gran);
-  }));
-
-  // Exportação completa (backup)
-  r.get('/export', h((_req, res) => {
-    res.setHeader('Content-Disposition', `attachment; filename="doceria-backup-${new Date().toISOString().slice(0, 10)}.json"`);
-    return {
-      exportedAt: new Date().toISOString(),
-      settings: repo.getSettings(db),
-      ingredients: repo.listIngredients(db).map((i) => ({ ...i, costPerBase: costPerBase(i) })),
-      priceHistory: repo.allHistory(db),
-      recipes: repo.listRecipes(db),
-      products: repo.listProducts(db),
-      market: repo.listMarket(db),
-      transactions: repo.listTransactions(db),
-    };
-  }));
-
-  r.use((_req, res) => res.status(404).json({ error: 'Rota não encontrada.' }));
-
-  // Tratamento centralizado de erros
-  r.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
-    if (err instanceof ZodError) {
-      const issue = err.issues[0];
-      return res.status(400).json({ error: issue?.message ?? 'Dados inválidos.', field: issue?.path.join('.'), issues: err.issues });
-    }
-    if (err instanceof repo.NotFound) return res.status(404).json({ error: err.message });
-    if (err instanceof repo.Conflict || err instanceof CalcError) return res.status(409).json({ error: err.message });
-    if (err instanceof SyntaxError) return res.status(400).json({ error: 'JSON inválido.' });
-    const msg = err instanceof Error ? err.message : String(err);
-    if (/FOREIGN KEY/i.test(msg)) return res.status(409).json({ error: 'Registro em uso por outro cadastro.' });
-    console.error(err);
-    res.status(500).json({ error: 'Erro interno. Tente novamente.' });
   });
 
-  return r;
+  return function handle(req: ApiRequest): ApiResponse {
+    const path = req.path.replace(/^\/api(?=\/)/, '');
+    for (const r of routes) {
+      if (r.method !== req.method) continue;
+      const m = r.pattern.exec(path);
+      if (!m) continue;
+      const params: Record<string, string> = {};
+      r.keys.forEach((k, i) => (params[k] = decodeURIComponent(m[i + 1])));
+      const ctx: Ctx = { params, query: req.query ?? {}, body: req.body };
+      try {
+        // Toda alteração é atômica: ou grava tudo, ou nada.
+        const out = req.method === 'GET' ? r.handler(ctx) : tx(db, () => r.handler(ctx));
+        return { status: r.status, body: out ?? { ok: true } };
+      } catch (e) {
+        return errorResponse(e);
+      }
+    }
+    return { status: 404, body: { error: 'Rota não encontrada.' } };
+  };
 }

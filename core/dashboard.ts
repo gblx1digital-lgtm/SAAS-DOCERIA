@@ -5,6 +5,11 @@ import type { BaseUnit } from '../shared/types.ts';
 
 export type Granularity = 'day' | 'week' | 'month';
 
+/** Data AAAA-MM-DD no fuso do aparelho. */
+function localISODate(d: Date): string {
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+}
+
 function bucketOf(date: string, g: Granularity): string {
   if (g === 'day') return date;
   if (g === 'month') return date.slice(0, 7);
@@ -133,8 +138,8 @@ export function buildDashboard(db: DB, from: string, to: string, gran: Granulari
   }
   alerts.sort((a, b) => b.changePct - a.changePct);
 
-  const today = new Date().toISOString().slice(0, 10);
-  const staleLimit = new Date(Date.now() - 90 * 864e5).toISOString().slice(0, 10);
+  const today = localISODate(new Date());
+  const staleLimit = localISODate(new Date(Date.now() - 90 * 864e5));
   const stale = ingredients
     .filter((i) => i.lastPurchaseDate < staleLimit)
     .map((i) => ({ id: i.id, name: i.name, lastPurchaseDate: i.lastPurchaseDate }));

@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { api } from './api.ts';
+import { EXTERNAL_CHANGE_EVENT, getMeta, getStorageInfo, type StorageMode } from './db-client.ts';
 import { indexById, type CalcContext } from '../../shared/calc.ts';
 import {
   DEFAULT_SETTINGS,
@@ -20,11 +21,21 @@ interface Data {
   history: PriceHistoryEntry[];
 }
 
+export interface StorageStatus {
+  mode: StorageMode;
+  /** Dados salvos existem mas não puderam ser abertos. */
+  unreadable: boolean;
+  lastBackupAt: string | null;
+  persisted: boolean | null;
+}
+
 interface Store extends Data {
   loading: boolean;
   error: string | null;
   ctx: CalcContext;
+  storage: StorageStatus;
   reload: (...keys: (keyof Data)[]) => Promise<void>;
+  refreshStorage: () => Promise<void>;
 }
 
 const StoreCtx = createContext<Store | null>(null);
@@ -49,6 +60,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [storage, setStorage] = useState<StorageStatus>({ mode: 'browser', unreadable: false, lastBackupAt: null, persisted: null });
+
+  const refreshStorage = useCallback(async () => {
+    const [info, meta] = await Promise.all([getStorageInfo(), getMeta()]);
+    setStorage({ mode: info.mode, unreadable: info.unreadable, lastBackupAt: meta.lastBackupAt ?? null, persisted: meta.persisted ?? null });
+  }, []);
 
   const reload = useCallback(async (...keys: (keyof Data)[]) => {
     const list = keys.length ? keys : (Object.keys(endpoints) as (keyof Data)[]);
@@ -66,7 +83,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    reload().finally(() => setLoading(false));
+    reload()
+      .then(refreshStorage)
+      .finally(() => setLoading(false));
+  }, [reload, refreshStorage]);
+
+  // Outra aba (ou janela) salvou alterações: recarrega tudo.
+  useEffect(() => {
+    const onChange = () => void reload();
+    window.addEventListener(EXTERNAL_CHANGE_EVENT, onChange);
+    return () => window.removeEventListener(EXTERNAL_CHANGE_EVENT, onChange);
   }, [reload]);
 
   const ctx = useMemo<CalcContext>(
@@ -74,7 +100,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     [data.ingredients, data.recipes, data.settings],
   );
 
-  return <StoreCtx.Provider value={{ ...data, loading, error, ctx, reload }}>{children}</StoreCtx.Provider>;
+  return <StoreCtx.Provider value={{ ...data, loading, error, ctx, storage, reload, refreshStorage }}>{children}</StoreCtx.Provider>;
 }
 
 export function useStore() {

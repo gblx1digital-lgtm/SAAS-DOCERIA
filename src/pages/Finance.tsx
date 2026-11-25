@@ -3,11 +3,12 @@ import { ArrowDownLeft, ArrowUpRight, Pencil, Plus, ShoppingBag, Trash2, Wallet 
 import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { useStore } from '../lib/store.tsx';
 import { api } from '../lib/api.ts';
+import { EXTERNAL_CHANGE_EVENT } from '../lib/db-client.ts';
 import { baseUnitOf, compatibleUnits } from '../../shared/calc.ts';
 import { PAYMENT_LABEL, TX_CATEGORY_LABEL, type PaymentMethod, type Transaction, type TxCategory, type Unit } from '../../shared/types.ts';
 import { date, money, number, parseNum, toField, todayISO } from '../lib/format.ts';
 import { bucketLabel, PeriodPicker, usePeriod } from '../components/Period.tsx';
-import type { Dashboard } from '../../server/dashboard.ts';
+import type { Dashboard } from '../../core/dashboard.ts';
 import {
   Badge, Button, Card, cx, Empty, Field, IconButton, Input, Modal, Notice, NumInput, PageHeader, Select, Stat, TableWrap, Td, Th, useFeedback,
 } from '../components/ui.tsx';
@@ -37,6 +38,11 @@ export function useFinance(from: string, to: string, gran: string) {
     }
   }, [from, to, gran]);
   useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    const onChange = () => void load();
+    window.addEventListener(EXTERNAL_CHANGE_EVENT, onChange);
+    return () => window.removeEventListener(EXTERNAL_CHANGE_EVENT, onChange);
+  }, [load]);
   return { data, txs, error, loading, load };
 }
 

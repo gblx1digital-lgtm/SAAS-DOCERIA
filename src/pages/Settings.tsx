@@ -1,10 +1,11 @@
-import { useMemo, useState } from 'react';
-import { Download, Plus, Trash2 } from 'lucide-react';
+import { useMemo, useRef, useState } from 'react';
+import { Download, Plus, Trash2, Upload } from 'lucide-react';
 import { useStore } from '../lib/store.tsx';
 import { api } from '../lib/api.ts';
+import { downloadBackup, downloadUnreadable, resetAllData, restoreBackup } from '../lib/db-client.ts';
 import { hourlyRates, priceForMargin } from '../../shared/calc.ts';
 import type { Settings } from '../../shared/types.ts';
-import { money, parseNum, pct, toField } from '../lib/format.ts';
+import { date, money, parseNum, pct, toField } from '../lib/format.ts';
 import { Button, Card, Field, IconButton, Input, Notice, NumInput, PageHeader, Select, useFeedback } from '../components/ui.tsx';
 
 type NumKeys = { [K in keyof Settings]: Settings[K] extends number ? K : never }[keyof Settings];
@@ -14,7 +15,13 @@ const NUM_KEYS: NumKeys[] = [
 ];
 
 export default function SettingsPage() {
-  const { settings, reload } = useStore();
+  const { settings } = useStore();
+  // Remonta o formulário quando as configurações mudam por fora (restauração, outra aba).
+  return <SettingsForm key={JSON.stringify(settings)} settings={settings} />;
+}
+
+function SettingsForm({ settings }: { settings: Settings }) {
+  const { reload } = useStore();
   const { toast } = useFeedback();
   const [f, setF] = useState(() => ({
     businessName: settings.businessName,
@@ -70,12 +77,7 @@ export default function SettingsPage() {
       <PageHeader
         title="Custos e configurações"
         description="Esses valores entram no custo de cada produto, proporcional ao tempo de produção. Informe apenas a parte das contas usada na produção."
-        actions={
-          <>
-            <a href="/api/export" download><Button icon={<Download className="size-4" />}>Backup (JSON)</Button></a>
-            <Button variant="primary" loading={saving} onClick={save}>Salvar configurações</Button>
-          </>
-        }
+        actions={<Button variant="primary" loading={saving} onClick={save}>Salvar configurações</Button>}
       />
       {error && <Notice tone="neg" className="mb-4">{error}</Notice>}
 
@@ -147,6 +149,7 @@ export default function SettingsPage() {
         </div>
 
         <aside className="space-y-3 lg:sticky lg:top-6 lg:self-start">
+          <DataCard />
           <Card title="Como isso vira custo">
             <dl className="space-y-2 text-[13px]">
               <Row label="Mão de obra" value={`${money(rates.laborPerHour)}/h`} />
@@ -173,4 +176,122 @@ export default function SettingsPage() {
 
 function Row({ label, value }: { label: string; value: string }) {
   return <div className="flex justify-between gap-3"><dt className="text-muted">{label}</dt><dd className="num">{value}</dd></div>;
+}
+
+function DataCard() {
+  const { storage, reload, refreshStorage } = useStore();
+  const { toast, confirm } = useFeedback();
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [busy, setBusy] = useState<'backup' | 'restore' | 'reset' | null>(null);
+
+  const backup = async () => {
+    setBusy('backup');
+    try {
+      if (await downloadBackup()) toast('Backup gerado. Guarde o arquivo em local seguro (Drive, e-mail, WhatsApp…).');
+      await refreshStorage();
+    } catch (e) {
+      toast((e as Error).message, 'neg');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const restore = async (file: File | undefined) => {
+    if (fileRef.current) fileRef.current.value = '';
+    if (!file) return;
+    const ok = await confirm({
+      title: 'Restaurar backup',
+      message: (
+        <>
+          Os dados atuais deste navegador serão <b>substituídos</b> pelos do arquivo <b>{file.name}</b>. Se quiser guardar os
+          dados atuais, faça um backup antes.
+        </>
+      ),
+      confirmLabel: 'Restaurar',
+      danger: true,
+    });
+    if (!ok) return;
+    setBusy('restore');
+    try {
+      await restoreBackup(file);
+      await reload();
+      await refreshStorage();
+      toast('Backup restaurado.');
+    } catch (e) {
+      toast((e as Error).message, 'neg');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const reset = async () => {
+    const ok = await confirm({
+      title: 'Apagar todos os dados',
+      message: (
+        <>
+          Isso apaga <b>todos</b> os ingredientes, receitas, produtos, preços de mercado, lançamentos e configurações deste
+          navegador. Não dá para desfazer. Faça um backup antes se tiver dúvida.
+        </>
+      ),
+      confirmLabel: 'Apagar tudo',
+      danger: true,
+    });
+    if (!ok) return;
+    setBusy('reset');
+    try {
+      await resetAllData();
+      await reload();
+      await refreshStorage();
+      toast('Todos os dados foram apagados.');
+    } catch (e) {
+      toast((e as Error).message, 'neg');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <Card title="Seus dados" subtitle="Ficam salvos neste navegador, neste aparelho.">
+      {storage.mode === 'memory' && (
+        <Notice tone="neg" className="mb-3">
+          Este navegador está bloqueando o armazenamento (modo anônimo ou bloqueio de cookies). Nada será salvo ao fechar.
+        </Notice>
+      )}
+      {storage.unreadable && (
+        <Notice tone="neg" className="mb-3">
+          Os dados salvos não puderam ser abertos.{' '}
+          <button className="font-medium underline" onClick={() => downloadUnreadable()}>Baixar uma cópia deles</button>{' '}
+          antes de restaurar um backup.
+        </Notice>
+      )}
+      <dl className="mb-3 space-y-1.5 text-[12.5px]">
+        <div className="flex justify-between gap-3">
+          <dt className="text-muted">Último backup</dt>
+          <dd className={storage.lastBackupAt ? 'text-ink' : 'text-warn'}>{storage.lastBackupAt ? date(storage.lastBackupAt.slice(0, 10)) : 'Nunca'}</dd>
+        </div>
+        {storage.persisted && (
+          <div className="flex justify-between gap-3">
+            <dt className="text-muted">Armazenamento protegido pelo navegador</dt>
+            <dd className="text-pos">Sim</dd>
+          </div>
+        )}
+      </dl>
+      <div className="grid gap-2">
+        <Button variant="primary" icon={<Download className="size-4" />} loading={busy === 'backup'} onClick={backup} disabled={storage.unreadable}>
+          Fazer backup
+        </Button>
+        <Button icon={<Upload className="size-4" />} loading={busy === 'restore'} onClick={() => fileRef.current?.click()}>
+          Restaurar backup
+        </Button>
+        <input ref={fileRef} type="file" accept=".json,.db,application/json" className="hidden" onChange={(e) => restore(e.target.files?.[0])} />
+      </div>
+      <p className="mt-3 text-[11.5px] leading-relaxed text-muted">
+        Para usar em outro aparelho: faça o backup aqui e use “Restaurar backup” no outro. Faça backup com frequência: se o
+        navegador for limpo, os dados somem.
+      </p>
+      <button className="mt-3 text-[12px] font-medium text-neg hover:underline disabled:opacity-50" onClick={reset} disabled={busy !== null}>
+        Apagar todos os dados…
+      </button>
+    </Card>
+  );
 }

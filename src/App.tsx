@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { NavLink, Route, Routes, useLocation } from 'react-router-dom';
+import { Link, NavLink, Route, Routes, useLocation } from 'react-router-dom';
 import {
   BarChart3, BookOpen, Cake, Calculator, LayoutDashboard, Menu, Settings as SettingsIcon, Store, Wallet, Wheat, X,
 } from 'lucide-react';
@@ -66,13 +66,25 @@ function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
           ),
         )}
       </nav>
-      <div className="border-t border-line px-4 py-3 text-[11.5px] text-faint">Dados salvos no banco local do sistema.</div>
+      <BackupFooter onNavigate={onNavigate} />
+    </div>
+  );
+}
+
+function BackupFooter({ onNavigate }: { onNavigate?: () => void }) {
+  const { storage } = useStore();
+  return (
+    <div className="border-t border-line px-4 py-3 text-[11.5px] leading-relaxed text-faint">
+      Dados salvos neste navegador.{' '}
+      <Link to="/configuracoes" onClick={onNavigate} className="font-medium text-muted underline-offset-2 hover:text-ink hover:underline">
+        {storage.lastBackupAt ? 'Fazer backup' : 'Nenhum backup ainda'}
+      </Link>
     </div>
   );
 }
 
 export default function App() {
-  const { loading, error } = useStore();
+  const { loading, error, storage } = useStore();
   const [open, setOpen] = useState(false);
   const loc = useLocation();
   useEffect(() => window.scrollTo(0, 0), [loc.pathname]);
@@ -109,6 +121,12 @@ export default function App() {
         {error && (
           <Notice tone="neg" className="mb-5">
             {error}
+          </Notice>
+        )}
+        {!loading && storage.mode === 'memory' && (
+          <Notice tone="neg" className="mb-5">
+            Este navegador está bloqueando o armazenamento de dados (modo anônimo ou bloqueio de cookies). O que você cadastrar
+            será perdido ao fechar a página. Abra o site numa janela normal.
           </Notice>
         )}
         {loading ? (
