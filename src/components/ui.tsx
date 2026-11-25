@@ -302,7 +302,7 @@ export function Modal({
           </IconButton>
         </header>
         <div className="scroll-thin flex-1 overflow-y-auto px-5 py-4">{children}</div>
-        {footer && <footer className="flex flex-wrap justify-end gap-2 border-t border-line bg-subtle/40 px-5 py-3">{footer}</footer>}
+        {footer && <footer className="flex flex-wrap justify-end gap-2 border-t border-line bg-subtle/40 px-5 pt-3 pb-16 sm:pb-3">{footer}</footer>}
       </div>
     </div>
   );
@@ -337,7 +337,7 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
   return (
     <FeedbackCtx.Provider value={{ toast, confirm }}>
       {children}
-      <div className="pointer-events-none fixed bottom-4 left-1/2 z-[60] flex w-[calc(100%-2rem)] max-w-sm -translate-x-1/2 flex-col gap-2 sm:left-auto sm:right-4 sm:translate-x-0">
+      <div className="pointer-events-none fixed top-4 left-1/2 z-[60] flex w-[calc(100%-2rem)] max-w-sm -translate-x-1/2 flex-col gap-2 sm:left-auto sm:right-4 sm:translate-x-0">
         {toasts.map((t) => (
           <div
             key={t.id}

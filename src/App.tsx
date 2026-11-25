@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import { useStore } from './lib/store.tsx';
 import { cx, Notice } from './components/ui.tsx';
+import { ErrorBoundary } from './components/ErrorBoundary.tsx';
 import Dashboard from './pages/Dashboard.tsx';
 import Ingredients from './pages/Ingredients.tsx';
 import Recipes from './pages/Recipes.tsx';
@@ -87,7 +88,9 @@ export default function App() {
   const { loading, error, storage } = useStore();
   const [open, setOpen] = useState(false);
   const loc = useLocation();
-  useEffect(() => window.scrollTo(0, 0), [loc.pathname]);
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [loc.pathname]);
   const currentLabel =
     NAV.flatMap((n) => ('to' in n ? [n] : [])).find((n) => (n.to === '/' ? loc.pathname === '/' : loc.pathname.startsWith(n.to)))?.label ?? '';
 
@@ -117,7 +120,7 @@ export default function App() {
         </div>
       )}
 
-      <main className="mx-auto max-w-[1240px] px-4 py-6 sm:px-6 lg:px-10 lg:py-9">
+      <main className="mx-auto max-w-[1240px] px-4 pt-6 pb-24 sm:px-6 lg:px-10 lg:py-9">
         {error && (
           <Notice tone="neg" className="mb-5">
             {error}
@@ -134,6 +137,7 @@ export default function App() {
             <span className="mr-2 size-4 animate-spin rounded-full border-2 border-current border-r-transparent" /> Carregando…
           </div>
         ) : (
+          <ErrorBoundary key={loc.pathname}>
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route path="/ingredientes" element={<Ingredients />} />
@@ -145,6 +149,7 @@ export default function App() {
             <Route path="/configuracoes" element={<SettingsPage />} />
             <Route path="*" element={<Notice>Página não encontrada.</Notice>} />
           </Routes>
+          </ErrorBoundary>
         )}
       </main>
     </div>
