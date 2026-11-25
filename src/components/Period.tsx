@@ -1,0 +1,87 @@
+import { useEffect, useState } from 'react';
+import { addDays, todayISO } from '../lib/format.ts';
+import { Input, Segmented, Select } from './ui.tsx';
+
+export type Gran = 'day' | 'week' | 'month';
+export interface Period { from: string; to: string; gran: Gran; preset: string }
+
+const PRESETS = {
+  today: 'Hoje',
+  '7d': 'Últimos 7 dias',
+  month: 'Este mês',
+  lastMonth: 'Mês passado',
+  '90d': 'Últimos 90 dias',
+  year: 'Este ano',
+  custom: 'Personalizado',
+} as const;
+
+function presetRange(p: string): { from: string; to: string; gran: Gran } {
+  const t = todayISO();
+  const [y, m] = t.split('-').map(Number);
+  switch (p) {
+    case 'today': return { from: t, to: t, gran: 'day' };
+    case '7d': return { from: addDays(t, -6), to: t, gran: 'day' };
+    case 'lastMonth': {
+      const first = new Date(Date.UTC(y, m - 2, 1)).toISOString().slice(0, 10);
+      const last = new Date(Date.UTC(y, m - 1, 0)).toISOString().slice(0, 10);
+      return { from: first, to: last, gran: 'day' };
+    }
+    case '90d': return { from: addDays(t, -89), to: t, gran: 'week' };
+    case 'year': return { from: `${y}-01-01`, to: t, gran: 'month' };
+    default: return { from: `${t.slice(0, 7)}-01`, to: t, gran: 'day' };
+  }
+}
+
+const KEY = 'doceria.period';
+
+export function usePeriod(): [Period, (p: Period) => void] {
+  const [period, setPeriod] = useState<Period>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(KEY) ?? 'null');
+      if (saved?.preset && saved.preset !== 'custom') return { ...presetRange(saved.preset), preset: saved.preset, gran: saved.gran ?? presetRange(saved.preset).gran };
+      if (saved?.from && saved?.to) return saved;
+    } catch { /* ignorado */ }
+    return { ...presetRange('month'), preset: 'month' };
+  });
+  useEffect(() => {
+    try { localStorage.setItem(KEY, JSON.stringify(period)); } catch { /* ignorado */ }
+  }, [period]);
+  return [period, setPeriod];
+}
+
+export function PeriodPicker({ value, onChange }: { value: Period; onChange: (p: Period) => void }) {
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <div className="w-44"><Select
+        value={value.preset}
+        onChange={(e) => {
+          const preset = e.target.value;
+          onChange(preset === 'custom' ? { ...value, preset } : { ...presetRange(preset), preset });
+        }}
+        aria-label="Período"
+      >
+        {Object.entries(PRESETS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+      </Select></div>
+      {value.preset === 'custom' && (
+        <>
+          <div className="w-[150px]"><Input type="date" value={value.from} max={value.to} onChange={(e) => e.target.value && onChange({ ...value, from: e.target.value })} aria-label="De" /></div>
+          <div className="w-[150px]"><Input type="date" value={value.to} min={value.from} onChange={(e) => e.target.value && onChange({ ...value, to: e.target.value })} aria-label="Até" /></div>
+        </>
+      )}
+      <Segmented
+        value={value.gran}
+        onChange={(gran) => onChange({ ...value, gran })}
+        options={[{ value: 'day', label: 'Dia' }, { value: 'week', label: 'Semana' }, { value: 'month', label: 'Mês' }]}
+      />
+    </div>
+  );
+}
+
+export function bucketLabel(b: string, g: Gran) {
+  if (g === 'month') {
+    const [y, m] = b.split('-');
+    return `${['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'][Number(m) - 1]}/${y.slice(2)}`;
+  }
+  const [, m, d] = b.split('-');
+  return `${d}/${m}`;
+}
