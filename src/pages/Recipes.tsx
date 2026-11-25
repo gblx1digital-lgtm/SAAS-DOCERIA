@@ -163,6 +163,7 @@ function RecipeForm({ initial, template, onClose }: { initial: Recipe | null; te
   const usedBy = initial ? productsUsingRecipe(products, initial.id) : [];
 
   const submit = async () => {
+    if (saving) return;
     setTouched(true);
     if (!valid) return;
     setSaving(true);

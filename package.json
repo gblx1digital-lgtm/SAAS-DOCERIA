@@ -1,7 +1,7 @@
 {
   "name": "doceria-gestao",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "module",
   "description": "Sistema de gestão financeira e precificação para confeitarias (roda 100% no navegador)",
   "scripts": {

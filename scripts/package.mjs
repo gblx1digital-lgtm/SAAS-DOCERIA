@@ -6,7 +6,8 @@ import zlib from 'node:zlib';
 
 const root = path.resolve(import.meta.dirname, '..');
 const dist = path.join(root, 'dist');
-const out = path.join(root, 'doceria-netlify.zip');
+const version = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
+const out = path.join(root, `doceria-netlify-v${version}.zip`);
 
 if (!fs.existsSync(path.join(dist, 'index.html'))) {
   console.error('dist/index.html não encontrado. Rode "npm run build" antes.');

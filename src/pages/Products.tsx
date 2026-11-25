@@ -210,6 +210,7 @@ function ProductForm({ initial, template, onClose }: { initial: Product | null; 
   }, [v, ctx]);
 
   const submit = async () => {
+    if (saving) return;
     setTouched(true);
     if (!valid) {
       const bad = errs.findIndex(Boolean);

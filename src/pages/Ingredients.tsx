@@ -192,6 +192,7 @@ export function IngredientForm({ initial, onClose, onSaved }: { initial: Ingredi
   const preview = valid ? costPerBase({ unit: f.unit, packageSize: size, packs, totalPrice: price }) : null;
 
   const submit = async () => {
+    if (saving) return;
     setTouched(true);
     if (!valid) return;
     setSaving(true);

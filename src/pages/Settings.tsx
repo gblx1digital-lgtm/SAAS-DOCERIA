@@ -55,6 +55,7 @@ function SettingsForm({ settings }: { settings: Settings }) {
   const example = priceForMargin(10, deductions, parsed.targetMarginPct);
 
   const save = async () => {
+    if (saving) return;
     if (invalid.length || fixedInvalid || marginErr || premiumErr || hoursErr) {
       setError('Corrija os campos destacados.');
       return;

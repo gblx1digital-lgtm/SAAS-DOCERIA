@@ -76,6 +76,7 @@ function BackupFooter({ onNavigate }: { onNavigate?: () => void }) {
   const { storage } = useStore();
   return (
     <div className="border-t border-line px-4 py-3 text-[11.5px] leading-relaxed text-faint">
+      <span className="mb-0.5 block text-faint/80">Versão {__APP_VERSION__}</span>
       Dados salvos neste navegador.{' '}
       <Link to="/configuracoes" onClick={onNavigate} className="font-medium text-muted underline-offset-2 hover:text-ink hover:underline">
         {storage.lastBackupAt ? 'Fazer backup' : 'Nenhum backup ainda'}

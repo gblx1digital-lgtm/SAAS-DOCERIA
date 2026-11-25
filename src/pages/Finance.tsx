@@ -285,6 +285,7 @@ export function TxForm({ kind, initial, onClose, onSaved }: { kind: FormKind; in
   const valid = Object.values(errs).every((e) => !e);
 
   const submit = async () => {
+    if (saving) return;
     setTouched(true);
     if (!valid) return;
     setSaving(true);
