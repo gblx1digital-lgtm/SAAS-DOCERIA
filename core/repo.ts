@@ -25,6 +25,12 @@ export class NotFound extends Error {
 }
 export class Conflict extends Error {}
 
+const STALE_EDIT =
+  'Este cadastro foi alterado em outra aba ou janela enquanto você editava. Feche e abra de novo para ver a versão atual.';
+function assertFresh(current: string, expected: string | undefined) {
+  if (expected !== undefined && expected !== current) throw new Conflict(STALE_EDIT);
+}
+
 // ───────── Settings ─────────
 
 export function getSettings(db: DB): Settings {
@@ -84,23 +90,6 @@ function recordHistory(db: DB, id: number, i: IngredientInput) {
   ).run(id, i.totalPrice, i.packageSize, i.packs, i.unit, costPerBase(i), i.lastPurchaseDate);
 }
 
-/** Registra uma compra antiga apenas no histórico (não muda o preço atual). */
-export function addPriceHistory(
-  db: DB,
-  id: number,
-  p: { totalPrice: number; packageSize: number; packs: number; unit: Unit; purchaseDate: string },
-) {
-  const ing = getIngredient(db, id);
-  const base = (u: string) => (u === 'kg' || u === 'g' ? 'g' : u === 'l' || u === 'ml' ? 'ml' : 'un');
-  if (base(p.unit) !== base(ing.unit))
-    throw new Conflict(`Unidade "${p.unit}" incompatível com "${ing.name}" (comprado em ${ing.unit}).`);
-  db.prepare(
-    `INSERT INTO ingredient_price_history
-     (ingredient_id, total_price, package_size, packs, unit, cost_per_base, purchase_date)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  ).run(id, p.totalPrice, p.packageSize, p.packs, p.unit, costPerBase(p), p.purchaseDate);
-}
-
 export function createIngredient(db: DB, i: IngredientInput): Ingredient {
   assertUniqueIngredientName(db, i.name);
   return tx(db, () => {
@@ -128,8 +117,9 @@ function assertUnitChangeAllowed(db: DB, id: number, newUnit: Unit, oldUnit: Uni
     );
 }
 
-export function updateIngredient(db: DB, id: number, i: IngredientInput): Ingredient {
+export function updateIngredient(db: DB, id: number, i: IngredientInput, expectedUpdatedAt?: string): Ingredient {
   const old = getIngredient(db, id);
+  assertFresh(old.updatedAt, expectedUpdatedAt);
   assertUniqueIngredientName(db, i.name, id);
   assertUnitChangeAllowed(db, id, i.unit, old.unit);
   return tx(db, () => {
@@ -261,8 +251,8 @@ export function createRecipe(db: DB, r: RecipeInput): Recipe {
   });
 }
 
-export function updateRecipe(db: DB, id: number, r: RecipeInput): Recipe {
-  getRecipe(db, id);
+export function updateRecipe(db: DB, id: number, r: RecipeInput, expectedUpdatedAt?: string): Recipe {
+  assertFresh(getRecipe(db, id).updatedAt, expectedUpdatedAt);
   assertIngredientsExist(db, r.items);
   if (!r.totalWeightG) {
     const n = (db.prepare("SELECT COUNT(*) c FROM variant_components WHERE recipe_id = ? AND mode = 'gram'").get(id) as Row).c;
@@ -395,8 +385,8 @@ export function createProduct(db: DB, p: ProductInput): Product {
   });
 }
 
-export function updateProduct(db: DB, id: number, p: ProductInput): Product {
-  getProduct(db, id);
+export function updateProduct(db: DB, id: number, p: ProductInput, expectedUpdatedAt?: string): Product {
+  assertFresh(getProduct(db, id).updatedAt, expectedUpdatedAt);
   validateProductRefs(db, p);
   return tx(db, () => {
     db.prepare(
@@ -451,6 +441,60 @@ export function deleteMarket(db: DB, id: number) {
   if (!r.changes) throw new NotFound('Preço de mercado');
 }
 
+// ───────── Compras e histórico de preços ─────────
+
+const baseDim = (u: string) => (u === 'kg' || u === 'g' ? 'g' : u === 'l' || u === 'ml' ? 'ml' : 'un');
+
+/** O preço atual do ingrediente passa a ser o da compra mais recente (por data) do histórico. */
+export function syncIngredientFromHistory(db: DB, ingredientId: number) {
+  const ing = getIngredient(db, ingredientId);
+  const last = db
+    .prepare('SELECT * FROM ingredient_price_history WHERE ingredient_id = ? ORDER BY purchase_date DESC, id DESC LIMIT 1')
+    .get(ingredientId) as Row | undefined;
+  if (!last || baseDim(last.unit) !== baseDim(ing.unit)) return;
+  if (
+    last.total_price === ing.totalPrice &&
+    last.package_size === ing.packageSize &&
+    last.packs === ing.packs &&
+    last.unit === ing.unit &&
+    last.purchase_date === ing.lastPurchaseDate
+  )
+    return;
+  db.prepare(
+    `UPDATE ingredients SET total_price=?, package_size=?, packs=?, unit=?, last_purchase_date=?, updated_at=datetime('now') WHERE id=?`,
+  ).run(last.total_price, last.package_size, last.packs, last.unit, last.purchase_date, ingredientId);
+}
+
+export interface PurchaseInput {
+  totalPrice: number;
+  packageSize: number;
+  packs: number;
+  unit: Unit;
+  purchaseDate: string;
+}
+
+/** Registra a compra no histórico do ingrediente (ligada ao lançamento) e atualiza o preço atual. */
+export function linkPurchase(db: DB, transactionId: number, ingredientId: number, p: PurchaseInput) {
+  const ing = getIngredient(db, ingredientId);
+  if (baseDim(p.unit) !== baseDim(ing.unit))
+    throw new Conflict(`Medida "${p.unit}" incompatível com "${ing.name}" (cadastrado em ${ing.unit}).`);
+  db.prepare(
+    `INSERT INTO ingredient_price_history
+     (ingredient_id, total_price, package_size, packs, unit, cost_per_base, purchase_date, transaction_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(ingredientId, p.totalPrice, p.packageSize, p.packs, p.unit, costPerBase(p), p.purchaseDate, transactionId);
+  syncIngredientFromHistory(db, ingredientId);
+}
+
+/** Desfaz o efeito de uma compra no preço do ingrediente (ao editar ou excluir o lançamento). */
+export function unlinkPurchase(db: DB, transactionId: number) {
+  const ids = (
+    db.prepare('SELECT DISTINCT ingredient_id FROM ingredient_price_history WHERE transaction_id = ?').all(transactionId) as Row[]
+  ).map((r) => Number(r.ingredient_id));
+  db.prepare('DELETE FROM ingredient_price_history WHERE transaction_id = ?').run(transactionId);
+  for (const id of ids) syncIngredientFromHistory(db, id);
+}
+
 // ───────── Transactions ─────────
 
 const mapTx = (r: Row): Transaction => ({
@@ -466,22 +510,32 @@ const mapTx = (r: Row): Transaction => ({
   variantId: r.variant_id,
   quantity: r.quantity,
   unitCost: r.unit_cost,
+  unitMaterialCost: r.unit_material_cost ?? null,
+  unitLaborCost: r.unit_labor_cost ?? null,
+  tax: r.tax ?? null,
   ingredientId: r.ingredient_id,
+  purchase: r.p_packs != null ? { packs: r.p_packs, packageSize: r.p_size, unit: r.p_unit } : null,
   createdAt: r.created_at,
 });
 
-export type TxInput = Omit<Transaction, 'id' | 'createdAt'>;
+const TX_SELECT = `SELECT t.*,
+  (SELECT packs FROM ingredient_price_history h WHERE h.transaction_id = t.id LIMIT 1) AS p_packs,
+  (SELECT package_size FROM ingredient_price_history h WHERE h.transaction_id = t.id LIMIT 1) AS p_size,
+  (SELECT unit FROM ingredient_price_history h WHERE h.transaction_id = t.id LIMIT 1) AS p_unit
+  FROM transactions t`;
+
+export type TxInput = Omit<Transaction, 'id' | 'createdAt' | 'purchase'>;
 
 export function listTransactions(db: DB, from?: string, to?: string): Transaction[] {
   return (
     db
-      .prepare('SELECT * FROM transactions WHERE date >= ? AND date <= ? ORDER BY date DESC, id DESC')
+      .prepare(`${TX_SELECT} WHERE t.date >= ? AND t.date <= ? ORDER BY t.date DESC, t.id DESC`)
       .all(from ?? '0000-01-01', to ?? '9999-12-31') as Row[]
   ).map(mapTx);
 }
 
 export function getTransaction(db: DB, id: number): Transaction {
-  const r = db.prepare('SELECT * FROM transactions WHERE id = ?').get(id) as Row | undefined;
+  const r = db.prepare(`${TX_SELECT} WHERE t.id = ?`).get(id) as Row | undefined;
   if (!r) throw new NotFound('Lançamento');
   return mapTx(r);
 }
@@ -490,11 +544,12 @@ export function createTransaction(db: DB, t: TxInput): Transaction {
   const res = db
     .prepare(
       `INSERT INTO transactions (date, type, category, description, amount, fee, payment_method, product_id, variant_id,
-       quantity, unit_cost, ingredient_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       quantity, unit_cost, unit_material_cost, unit_labor_cost, tax, ingredient_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       t.date, t.type, t.category, t.description, t.amount, t.fee, t.paymentMethod,
-      t.productId, t.variantId, t.quantity, t.unitCost, t.ingredientId,
+      t.productId, t.variantId, t.quantity, t.unitCost, t.unitMaterialCost, t.unitLaborCost, t.tax, t.ingredientId,
     );
   return getTransaction(db, Number(res.lastInsertRowid));
 }
@@ -503,15 +558,26 @@ export function updateTransaction(db: DB, id: number, t: TxInput): Transaction {
   getTransaction(db, id);
   db.prepare(
     `UPDATE transactions SET date=?, type=?, category=?, description=?, amount=?, fee=?, payment_method=?, product_id=?,
-     variant_id=?, quantity=?, unit_cost=?, ingredient_id=? WHERE id=?`,
+     variant_id=?, quantity=?, unit_cost=?, unit_material_cost=?, unit_labor_cost=?, tax=?, ingredient_id=? WHERE id=?`,
   ).run(
     t.date, t.type, t.category, t.description, t.amount, t.fee, t.paymentMethod,
-    t.productId, t.variantId, t.quantity, t.unitCost, t.ingredientId, id,
+    t.productId, t.variantId, t.quantity, t.unitCost, t.unitMaterialCost, t.unitLaborCost, t.tax, t.ingredientId, id,
   );
   return getTransaction(db, id);
 }
 
 export function deleteTransaction(db: DB, id: number) {
-  const r = db.prepare('DELETE FROM transactions WHERE id = ?').run(id);
-  if (!r.changes) throw new NotFound('Lançamento');
+  getTransaction(db, id);
+  unlinkPurchase(db, id);
+  db.prepare('DELETE FROM transactions WHERE id = ?').run(id);
+}
+
+/** Quantas vendas e preços de mercado cada tamanho do produto tem (para avisar antes de removê-lo). */
+export function productUsage(db: DB, productId: number) {
+  const p = getProduct(db, productId);
+  return p.variants.map((v) => ({
+    variantId: v.id,
+    sales: Number((db.prepare("SELECT COUNT(*) c FROM transactions WHERE variant_id = ? AND category = 'venda'").get(v.id) as Row).c),
+    market: Number((db.prepare('SELECT COUNT(*) c FROM market_prices WHERE variant_id = ?').get(v.id) as Row).c),
+  }));
 }

@@ -7,6 +7,7 @@ import { marketStats, priceForMargin, pricing, roundUp, safeVariantCost, unitPro
 import type { Product } from '../../shared/types.ts';
 import { money, number, parseNum, pct, toField } from '../lib/format.ts';
 import { CostBars, CurrentPriceBadge, PriceTiers } from '../components/PricingPanel.tsx';
+import { marketEntriesFor, MARKET_MAX_AGE_DAYS } from '../lib/market.ts';
 import { Badge, Button, Card, cx, Empty, Field, Modal, Notice, NumInput, PageHeader, SearchInput, TableWrap, Td, Th, useFeedback } from '../components/ui.tsx';
 
 export interface Row {
@@ -87,7 +88,9 @@ export default function PricingPage() {
               {list.map((r) => (
                 <tr key={r.variant.id} className="cursor-pointer hover:bg-subtle/50" onClick={() => setParams({ v: String(r.variant.id) })}>
                   <Td>
-                    <div className="font-medium">{r.product.name}</div>
+                    <div className="font-medium">
+                      {r.product.name} {!r.product.active && <Badge className="ml-1 align-middle">Inativo</Badge>}
+                    </div>
                     <div className="text-[12px] text-muted">{r.variant.name}</div>
                   </Td>
                   {r.pricing ? (
@@ -141,7 +144,7 @@ function PricingDetail({ row, onClose }: { row: Row; onClose: () => void }) {
   const goalNum = parseNum(goal);
   const units = profitAtPrice !== null && goalNum >= 0 ? unitsForProfit(goalNum, profitAtPrice) : null;
 
-  const mk = market.filter((x) => x.productId === row.product.id && (x.variantId === null || x.variantId === row.variant.id));
+  const mk = marketEntriesFor(market, row.product, row.variant.id);
   const stats = marketStats(mk.map((x) => x.price));
 
   const savePrice = async () => {
@@ -151,6 +154,7 @@ function PricingDetail({ row, onClose }: { row: Row; onClose: () => void }) {
       const prod = products.find((x) => x.id === row.product.id)!;
       await api.put(`/products/${prod.id}`, {
         ...prod,
+        expectedUpdatedAt: prod.updatedAt,
         variants: prod.variants.map((v) => (v.id === row.variant.id ? { ...v, salePrice: Math.round(priceNum * 100) / 100 } : v)),
       });
       await reload('products');
@@ -241,7 +245,7 @@ function PricingDetail({ row, onClose }: { row: Row; onClose: () => void }) {
               </div>
             ) : (
               <p className="text-[13px] text-muted">
-                Comparação indisponível: {mk.length === 0 ? 'nenhum preço de concorrente registrado' : `apenas ${mk.length} preço(s) registrado(s); são necessários pelo menos 3`}.
+                Comparação indisponível: {mk.length === 0 ? `nenhum preço de concorrente deste tamanho nos últimos ${MARKET_MAX_AGE_DAYS} dias` : `apenas ${mk.length} preço(s) deste tamanho; são necessários pelo menos 3`}.
               </p>
             )}
           </Card>

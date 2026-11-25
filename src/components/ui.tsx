@@ -16,6 +16,14 @@ import { AlertTriangle, CheckCircle2, Info, X } from 'lucide-react';
 
 export const cx = (...c: (string | false | null | undefined)[]) => c.filter(Boolean).join(' ');
 
+/** true quando o valor mudou desde a primeira renderização (formulário com alterações). */
+export function useDirty(value: unknown): boolean {
+  const first = useRef<string | null>(null);
+  const json = JSON.stringify(value);
+  if (first.current === null) first.current = json;
+  return json !== first.current;
+}
+
 // ───────── Button ─────────
 
 type Variant = 'primary' | 'secondary' | 'ghost' | 'danger';
@@ -61,7 +69,7 @@ export const IconButton = ({ label, children, className, ...rest }: ButtonHTMLAt
 // ───────── Form ─────────
 
 const fieldBase =
-  'w-full rounded-md border border-line bg-surface px-2.5 text-[13.5px] text-ink placeholder:text-faint transition-colors ' +
+  'w-full rounded-md border border-line bg-surface px-2.5 text-base sm:text-[13.5px] text-ink placeholder:text-faint transition-colors ' +
   'hover:border-line-strong focus:border-ink/40 focus:outline-none focus:ring-3 focus:ring-ink/5 disabled:bg-subtle disabled:text-muted';
 
 export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement> & { invalid?: boolean; suffix?: ReactNode; prefix?: ReactNode }>(
@@ -69,7 +77,7 @@ export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputE
     const input = (
       <input
         ref={ref}
-        className={cx(fieldBase, 'h-8.5', invalid && 'border-neg/60', prefix ? 'pl-8' : '', suffix ? 'pr-10' : '', className)}
+        className={cx(fieldBase, 'h-10 sm:h-8.5', invalid && 'border-neg/60', prefix ? 'pl-8' : '', suffix ? 'pr-10' : '', className)}
         aria-invalid={invalid || undefined}
         {...rest}
       />
@@ -113,7 +121,7 @@ export const Select = forwardRef<HTMLSelectElement, SelectHTMLAttributes<HTMLSel
       ref={ref}
       className={cx(
         fieldBase,
-        'h-8.5 appearance-none pr-8 bg-[url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A//www.w3.org/2000/svg%27%20width%3D%2712%27%20height%3D%2712%27%20fill%3D%27none%27%20stroke%3D%27%2378716c%27%20stroke-width%3D%271.6%27%3E%3Cpath%20d%3D%27M3%204.5l3%203%203-3%27/%3E%3C/svg%3E")] bg-no-repeat bg-[right_0.6rem_center]',
+        'h-10 sm:h-8.5 appearance-none pr-8 bg-[url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A//www.w3.org/2000/svg%27%20width%3D%2712%27%20height%3D%2712%27%20fill%3D%27none%27%20stroke%3D%27%2378716c%27%20stroke-width%3D%271.6%27%3E%3Cpath%20d%3D%27M3%204.5l3%203%203-3%27/%3E%3C/svg%3E")] bg-no-repeat bg-[right_0.6rem_center]',
         invalid && 'border-neg/60',
         className,
       )}
@@ -222,12 +230,12 @@ export function Notice({ tone = 'info', children, className }: { tone?: 'info' |
 // ───────── Table ─────────
 
 export const Th = ({ children, className, align = 'left' }: { children?: ReactNode; className?: string; align?: 'left' | 'right' }) => (
-  <th className={cx('h-9 border-b border-line bg-subtle/60 px-3 text-[12px] font-medium text-muted whitespace-nowrap', align === 'right' ? 'text-right' : 'text-left', className)}>
+  <th className={cx('h-9 border-b border-line bg-subtle/60 px-2 sm:px-3 text-[12px] font-medium text-muted whitespace-nowrap', align === 'right' ? 'text-right' : 'text-left', className)}>
     {children}
   </th>
 );
 export const Td = ({ children, className, align = 'left' }: { children?: ReactNode; className?: string; align?: 'left' | 'right' }) => (
-  <td className={cx('h-11 border-b border-line px-3 text-[13px]', align === 'right' && 'text-right num', className)}>{children}</td>
+  <td className={cx('h-11 border-b border-line px-2 sm:px-3 text-[13px]', align === 'right' && 'text-right num', className)}>{children}</td>
 );
 export const TableWrap = ({ children }: { children: ReactNode }) => (
   <div className="scroll-thin overflow-x-auto">
@@ -246,6 +254,8 @@ export function Modal({
   description,
   children,
   footer,
+  footerNote,
+  dirty = false,
   size = 'md',
 }: {
   open: boolean;
@@ -254,11 +264,28 @@ export function Modal({
   description?: ReactNode;
   children: ReactNode;
   footer?: ReactNode;
+  /** Mensagem (erro) mostrada junto dos botões, sempre visível. */
+  footerNote?: ReactNode;
+  /** Há dados digitados: pede confirmação antes de fechar por toque fora, Esc ou X. */
+  dirty?: boolean;
   size?: 'sm' | 'md' | 'lg' | 'xl';
 }) {
   const panel = useRef<HTMLDivElement>(null);
-  const closeRef = useRef(onClose);
-  closeRef.current = onClose;
+  const feedback = useContext(FeedbackCtx);
+  const requestClose = async () => {
+    if (dirty && feedback) {
+      const ok = await feedback.confirm({
+        title: 'Descartar o que foi preenchido?',
+        message: 'As informações digitadas nesta janela ainda não foram salvas.',
+        confirmLabel: 'Descartar',
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    onClose();
+  };
+  const closeRef = useRef(requestClose);
+  closeRef.current = requestClose;
   useEffect(() => {
     if (!open) return;
     const token = {};
@@ -269,8 +296,10 @@ export function Modal({
     document.addEventListener('keydown', onKey);
     const prev = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
+    // No celular não abre o teclado sozinho nem rola a janela até o primeiro campo.
+    const finePointer = typeof matchMedia === 'undefined' || matchMedia('(pointer: fine)').matches;
     const t = setTimeout(() => {
-      if (!panel.current?.contains(document.activeElement))
+      if (finePointer && !panel.current?.contains(document.activeElement))
         panel.current?.querySelector<HTMLElement>('input:not([type=checkbox]),select,textarea')?.focus();
     }, 30);
     return () => {
@@ -284,7 +313,7 @@ export function Modal({
   const widths = { sm: 'sm:max-w-md', md: 'sm:max-w-xl', lg: 'sm:max-w-3xl', xl: 'sm:max-w-5xl' };
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-start sm:p-6 sm:pt-[6vh]" role="dialog" aria-modal="true">
-      <div className="anim-fade absolute inset-0 bg-ink/25 backdrop-blur-[2px]" onClick={onClose} />
+      <div className="anim-fade absolute inset-0 bg-ink/25 backdrop-blur-[2px]" onClick={() => void requestClose()} />
       <div
         ref={panel}
         className={cx(
@@ -297,12 +326,17 @@ export function Modal({
             <h2 className="text-[15px] font-semibold text-ink">{title}</h2>
             {description && <p className="mt-0.5 text-[12.5px] text-muted">{description}</p>}
           </div>
-          <IconButton label="Fechar" onClick={onClose}>
+          <IconButton label="Fechar" onClick={() => void requestClose()}>
             <X className="size-4" />
           </IconButton>
         </header>
         <div className="scroll-thin flex-1 overflow-y-auto px-5 py-4">{children}</div>
-        {footer && <footer className="flex flex-wrap justify-end gap-2 border-t border-line bg-subtle/40 px-5 pt-3 pb-16 sm:pb-3">{footer}</footer>}
+        {footer && (
+          <footer className="flex flex-wrap items-center justify-end gap-2 border-t border-line bg-subtle/40 px-5 pt-3 pb-16 sm:pb-3">
+            {footerNote && <div role="alert" className="w-full text-[12.5px] font-medium text-neg sm:mr-auto sm:w-auto sm:max-w-[60%]">{footerNote}</div>}
+            {footer}
+          </footer>
+        )}
       </div>
     </div>
   );

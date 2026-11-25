@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { api } from './api.ts';
-import { EXTERNAL_CHANGE_EVENT, getMeta, getStorageInfo, type StorageMode } from './db-client.ts';
+import { BLOCKED_EVENT, EXTERNAL_CHANGE_EVENT, getMeta, getStorageInfo, type StorageMode } from './db-client.ts';
 import { indexById, type CalcContext } from '../../shared/calc.ts';
 import {
   DEFAULT_SETTINGS,
@@ -27,6 +27,8 @@ export interface StorageStatus {
   unreadable: boolean;
   lastBackupAt: string | null;
   persisted: boolean | null;
+  /** Esta aba precisa ser recarregada (dados alterados/substituídos em outra aba). */
+  blocked: string | null;
 }
 
 interface Store extends Data {
@@ -60,11 +62,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [storage, setStorage] = useState<StorageStatus>({ mode: 'browser', unreadable: false, lastBackupAt: null, persisted: null });
+  const [storage, setStorage] = useState<StorageStatus>({ mode: 'browser', unreadable: false, lastBackupAt: null, persisted: null, blocked: null });
 
   const refreshStorage = useCallback(async () => {
     const [info, meta] = await Promise.all([getStorageInfo(), getMeta()]);
-    setStorage({ mode: info.mode, unreadable: info.unreadable, lastBackupAt: meta.lastBackupAt ?? null, persisted: meta.persisted ?? null });
+    setStorage({ mode: info.mode, unreadable: info.unreadable, lastBackupAt: meta.lastBackupAt ?? null, persisted: meta.persisted ?? null, blocked: info.blocked });
   }, []);
 
   const reload = useCallback(async (...keys: (keyof Data)[]) => {
@@ -91,8 +93,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   // Outra aba (ou janela) salvou alterações: recarrega tudo.
   useEffect(() => {
     const onChange = () => void reload();
+    const onBlocked = (e: Event) => {
+      const message = (e as CustomEvent<string>).detail;
+      setStorage((s) => ({ ...s, blocked: message }));
+    };
     window.addEventListener(EXTERNAL_CHANGE_EVENT, onChange);
-    return () => window.removeEventListener(EXTERNAL_CHANGE_EVENT, onChange);
+    window.addEventListener(BLOCKED_EVENT, onBlocked);
+    return () => {
+      window.removeEventListener(EXTERNAL_CHANGE_EVENT, onChange);
+      window.removeEventListener(BLOCKED_EVENT, onBlocked);
+    };
   }, [reload]);
 
   const ctx = useMemo<CalcContext>(

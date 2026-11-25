@@ -2,13 +2,10 @@ import type { DB } from './db.ts';
 import * as repo from './repo.ts';
 import { indexById, safeVariantCost, sum } from '../shared/calc.ts';
 import type { BaseUnit } from '../shared/types.ts';
+import { localISODate } from '../shared/dates.ts';
 
 export type Granularity = 'day' | 'week' | 'month';
 
-/** Data AAAA-MM-DD no fuso do aparelho. */
-function localISODate(d: Date): string {
-  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
-}
 
 function bucketOf(date: string, g: Granularity): string {
   if (g === 'day') return date;
@@ -33,25 +30,62 @@ function bucketsBetween(from: string, to: string, g: Granularity): string[] {
   return out;
 }
 
-export function buildDashboard(db: DB, from: string, to: string, gran: Granularity) {
+/** Escolhe um agrupamento que caiba no gráfico (períodos longos passam para semana/mês). */
+function effectiveGranularity(from: string, to: string, g: Granularity): Granularity {
+  const days = (Date.parse(to + 'T00:00:00Z') - Date.parse(from + 'T00:00:00Z')) / 864e5 + 1;
+  if (g === 'day' && days > 120) g = 'week';
+  if (g === 'week' && days > 7 * 104) g = 'month';
+  return g;
+}
+
+export function buildDashboard(db: DB, from: string, to: string, requested: Granularity) {
+  const gran = effectiveGranularity(from, to, requested);
   const txs = repo.listTransactions(db, from, to);
   const ingredients = repo.listIngredients(db);
   const recipes = repo.listRecipes(db);
   const products = repo.listProducts(db);
   const settings = repo.getSettings(db);
   const ctx = { ingredients: indexById(ingredients), recipes: indexById(recipes), settings };
+  const variantById = new Map(products.flatMap((p) => p.variants.map((v) => [v.id, v] as const)));
 
   const sales = txs.filter((t) => t.category === 'venda');
+  /**
+   * Custos de cada venda, guardados no momento da venda:
+   * - ingredientes + embalagens (+ desperdício) e mão de obra entram no resultado do período;
+   * - contas e despesas fixas NÃO: no resultado elas contam pelo que foi lançado como despesa,
+   *   para não serem descontadas duas vezes.
+   * Vendas antigas sem esses valores usam a composição atual do produto como estimativa.
+   */
+  type Sale = (typeof sales)[number];
+  const estimate = (t: Sale) => {
+    const v = t.variantId ? variantById.get(t.variantId) : undefined;
+    const { cost } = v ? safeVariantCost(v, ctx) : { cost: null };
+    return cost?.breakdown ?? null;
+  };
+  const materialOf = (t: Sale): number => {
+    if (t.unitMaterialCost !== null) return t.unitMaterialCost;
+    const b = estimate(t);
+    return b ? b.ingredients + b.packaging + b.waste : t.unitCost ?? 0;
+  };
+  const laborOf = (t: Sale): number => {
+    if (t.unitLaborCost !== null) return t.unitLaborCost;
+    if (t.unitMaterialCost === null && !estimate(t)) return 0; // custo antigo já inteiro em materialOf
+    return estimate(t)?.labor ?? 0;
+  };
+  const fullCostOf = (t: Sale): number => t.unitCost ?? materialOf(t) + laborOf(t);
+  const taxOf = (t: Sale) => t.tax ?? (t.amount * settings.taxPct) / 100;
   const salesRevenue = sum(sales.map((t) => t.amount));
   const otherIncome = sum(txs.filter((t) => t.category === 'outra_entrada').map((t) => t.amount));
   const fees = sum(sales.map((t) => t.fee));
-  const cogs = sum(sales.map((t) => (t.unitCost ?? 0) * (t.quantity ?? 0)));
+  const materials = sum(sales.map((t) => materialOf(t) * (t.quantity ?? 0)));
+  const labor = sum(sales.map((t) => laborOf(t) * (t.quantity ?? 0)));
+  const cogs = materials + labor;
   const purchases = sum(txs.filter((t) => t.category === 'compra_ingrediente').map((t) => t.amount));
   const fixedExpenses = sum(txs.filter((t) => t.category === 'despesa_fixa').map((t) => t.amount));
   const variableExpenses = sum(txs.filter((t) => t.category === 'despesa_variavel').map((t) => t.amount));
   const otherExpenses = sum(txs.filter((t) => t.category === 'outra_saida').map((t) => t.amount));
   const expenses = fixedExpenses + variableExpenses + otherExpenses;
-  const taxes = (salesRevenue * settings.taxPct) / 100;
+  const taxes = sum(sales.map(taxOf));
   const estimatedProfit = salesRevenue + otherIncome - fees - taxes - cogs - expenses;
 
   const cashIn = salesRevenue + otherIncome - fees;
@@ -83,13 +117,13 @@ export function buildDashboard(db: DB, from: string, to: string, gran: Granulari
     };
     cur.quantity += s.quantity ?? 0;
     cur.revenue += s.amount;
-    cur.profit += s.amount - s.fee - (s.amount * settings.taxPct) / 100 - (s.unitCost ?? 0) * (s.quantity ?? 0);
+    // Lucro por produto com o custo completo (igual à Precificação).
+    cur.profit += s.amount - s.fee - taxOf(s) - fullCostOf(s) * (s.quantity ?? 0);
     byVariant.set(key, cur);
   }
   const productStats = [...byVariant.values()];
 
   // Ingredientes usados (estimado pela composição atual dos produtos vendidos)
-  const variantById = new Map(products.flatMap((p) => p.variants.map((v) => [v.id, v] as const)));
   const usage = new Map<number, { baseQty: number; cost: number }>();
   for (const s of sales) {
     const v = s.variantId ? variantById.get(s.variantId) : undefined;
@@ -123,7 +157,7 @@ export function buildDashboard(db: DB, from: string, to: string, gran: Granulari
     const [prev, cur] = arr;
     if (prev.costPerBase <= 0) continue;
     const changePct = ((cur.costPerBase - prev.costPerBase) / prev.costPerBase) * 100;
-    if (changePct >= settings.priceAlertPct) {
+    if (changePct > settings.priceAlertPct) {
       const ing = ingById.get(ingId);
       alerts.push({
         ingredientId: ingId,
@@ -145,13 +179,15 @@ export function buildDashboard(db: DB, from: string, to: string, gran: Granulari
     .map((i) => ({ id: i.id, name: i.name, lastPurchaseDate: i.lastPurchaseDate }));
 
   return {
-    period: { from, to, granularity: gran, today },
+    period: { from, to, granularity: gran, requestedGranularity: requested, today },
     totals: {
       salesRevenue,
       otherIncome,
       revenue: salesRevenue + otherIncome,
       fees,
       taxes,
+      materials,
+      labor,
       cogs,
       purchases,
       fixedExpenses,

@@ -7,7 +7,7 @@ import type { Recipe } from '../../shared/types.ts';
 import { minutes, money, number, parseNum, toField } from '../lib/format.ts';
 import { fromDraft, LineEditor, lineDraftCost, lineError, newLine, toDraft, type DraftLine } from '../components/LineEditor.tsx';
 import {
-  Badge, Button, Card, Empty, Field, IconButton, Input, Modal, Notice, NumInput, PageHeader, SearchInput, TableWrap, Td, Textarea, Th, useFeedback,
+  Badge, Button, Card, Empty, Field, IconButton, Input, Modal, Notice, NumInput, PageHeader, SearchInput, TableWrap, Td, Textarea, Th, useDirty, useFeedback,
 } from '../components/ui.tsx';
 
 function safeRecipeCost(r: Recipe, map: Parameters<typeof recipeCost>[1]): RecipeCost | null {
@@ -70,9 +70,9 @@ export default function Recipes() {
             <thead>
               <tr>
                 <Th>Receita</Th>
-                <Th align="right">Rendimento</Th>
+                <Th align="right" className="hidden sm:table-cell">Rendimento</Th>
                 <Th align="right" className="hidden md:table-cell">Preparo</Th>
-                <Th align="right">Custo total</Th>
+                <Th align="right" className="hidden sm:table-cell">Custo total</Th>
                 <Th align="right">Por unidade</Th>
                 <Th align="right" className="hidden sm:table-cell">Por porção</Th>
                 <Th />
@@ -84,22 +84,25 @@ export default function Recipes() {
                 const used = productsUsingRecipe(products, r.id);
                 return (
                   <tr key={r.id} className="hover:bg-subtle/50">
-                    <Td>
-                      <button className="text-left" onClick={() => setEditing(r)}>
-                        <div className="font-medium text-ink hover:underline">{r.name}</div>
-                        <div className="text-[12px] text-muted">
+                    <Td className="max-w-0 w-full sm:w-auto sm:max-w-none">
+                      <button className="block max-w-full text-left" onClick={() => setEditing(r)}>
+                        <div className="truncate font-medium text-ink hover:underline">{r.name}</div>
+                        <div className="truncate text-[12px] text-muted">
+                          <span className="sm:hidden">
+                            rende {number(r.yieldQty)} {r.yieldLabel} · total {c ? money(c.total) : '—'} ·{' '}
+                          </span>
                           {r.items.length} ingrediente(s){used.length ? ` · usada em ${used.length} produto(s)` : ''}
                         </div>
                       </button>
                     </Td>
-                    <Td align="right" className="whitespace-nowrap">{number(r.yieldQty)} {r.yieldLabel}</Td>
+                    <Td align="right" className="hidden whitespace-nowrap sm:table-cell">{number(r.yieldQty)} {r.yieldLabel}</Td>
                     <Td align="right" className="hidden whitespace-nowrap md:table-cell">{minutes(r.prepMinutes)}</Td>
-                    <Td align="right" className="font-medium">{c ? money(c.total) : <Badge tone="neg">Erro</Badge>}</Td>
-                    <Td align="right">{c ? money(c.perUnit) : '—'}</Td>
+                    <Td align="right" className="hidden font-medium sm:table-cell">{c ? money(c.total) : <Badge tone="neg">Erro</Badge>}</Td>
+                    <Td align="right" className="whitespace-nowrap">{c ? money(c.perUnit) : <Badge tone="neg">Erro</Badge>}</Td>
                     <Td align="right" className="hidden sm:table-cell">{c?.perPortion != null ? money(c.perPortion) : <span className="text-faint">—</span>}</Td>
                     <Td className="w-px whitespace-nowrap">
                       <div className="flex justify-end gap-0.5">
-                        <IconButton label="Duplicar" onClick={() => setCopyFrom(r)}><Copy className="size-4" /></IconButton>
+                        <IconButton label="Duplicar" className="hidden sm:inline-flex" onClick={() => setCopyFrom(r)}><Copy className="size-4" /></IconButton>
                         <IconButton label="Editar" onClick={() => setEditing(r)}><Pencil className="size-4" /></IconButton>
                         <IconButton label="Excluir" className="hover:text-neg" onClick={() => remove(r)}><Trash2 className="size-4" /></IconButton>
                       </div>
@@ -132,6 +135,7 @@ function RecipeForm({ initial, template, onClose }: { initial: Recipe | null; te
     notes: src?.notes ?? '',
   });
   const [lines, setLines] = useState<DraftLine[]>(src ? toDraft(src.items) : [newLine()]);
+  const dirty = useDirty({ f, lines });
   const [touched, setTouched] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -169,7 +173,7 @@ function RecipeForm({ initial, template, onClose }: { initial: Recipe | null; te
     setSaving(true);
     setError(null);
     try {
-      const body = { ...f, yieldQty, portions, totalWeightG: weight, prepMinutes: prep, items: fromDraft(lines) };
+      const body = { ...f, yieldQty, portions, totalWeightG: weight, prepMinutes: prep, items: fromDraft(lines), expectedUpdatedAt: initial?.updatedAt };
       if (initial) await api.put(`/recipes/${initial.id}`, body);
       else await api.post('/recipes', body);
       await reload('recipes');
@@ -186,6 +190,8 @@ function RecipeForm({ initial, template, onClose }: { initial: Recipe | null; te
     <Modal
       open
       onClose={onClose}
+      footerNote={error ?? (touched && !valid ? 'Confira os campos destacados em vermelho.' : null)}
+      dirty={dirty}
       size="xl"
       title={initial ? `Editar ${initial.name}` : 'Nova receita'}
       description="Os custos são atualizados enquanto você digita."

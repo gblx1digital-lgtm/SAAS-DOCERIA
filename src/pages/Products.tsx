@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Cake, Copy, Pencil, Plus, Trash2 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useStore } from '../lib/store.tsx';
@@ -9,7 +9,7 @@ import { money, parseNum, toField } from '../lib/format.ts';
 import { fromDraft, LineEditor, lineError, toDraft, type DraftLine } from '../components/LineEditor.tsx';
 import { CostBars, CurrentPriceBadge, PriceTiers } from '../components/PricingPanel.tsx';
 import {
-  Badge, Button, Card, cx, Empty, Field, IconButton, Input, Modal, Notice, NumInput, PageHeader, SearchInput, Select, Textarea, useFeedback,
+  Badge, Button, Card, cx, Empty, Field, IconButton, Input, Modal, Notice, NumInput, PageHeader, SearchInput, Select, Textarea, useDirty, useFeedback,
 } from '../components/ui.tsx';
 
 export default function Products() {
@@ -180,7 +180,20 @@ const MODE_LABEL: Record<ComponentMode, string> = { unit: 'unidade(s) do rendime
 
 function ProductForm({ initial, template, onClose }: { initial: Product | null; template?: Product; onClose: () => void }) {
   const { recipes, ctx, reload } = useStore();
-  const { toast } = useFeedback();
+  const { toast, confirm } = useFeedback();
+  /** Vendas e preços de mercado de cada tamanho já salvo (para avisar antes de remover). */
+  const [usage, setUsage] = useState<Map<number, { sales: number; market: number }>>(new Map());
+  useEffect(() => {
+    if (!initial) return;
+    let alive = true;
+    api
+      .get<{ variantId: number; sales: number; market: number }[]>(`/products/${initial.id}/usage`)
+      .then((rows) => alive && setUsage(new Map(rows.map((r) => [r.variantId, r]))))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [initial]);
   const src = initial ?? template;
   const [f, setF] = useState({
     name: initial ? initial.name : template ? `${template.name} (cópia)` : '',
@@ -189,6 +202,7 @@ function ProductForm({ initial, template, onClose }: { initial: Product | null; 
     active: src?.active ?? true,
   });
   const [variants, setVariants] = useState<DraftVariant[]>(src ? src.variants.map((v) => toDraftVariant(v, !!initial)) : [emptyVariant()]);
+  const dirty = useDirty({ f, variants });
   const [active, setActive] = useState(0);
   const [touched, setTouched] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -220,10 +234,10 @@ function ProductForm({ initial, template, onClose }: { initial: Product | null; 
     setSaving(true);
     setError(null);
     try {
-      const body = { ...f, name: f.name.trim(), variants: variants.map(parseVariant) };
+      const body = { ...f, name: f.name.trim(), variants: variants.map(parseVariant), expectedUpdatedAt: initial?.updatedAt };
       if (initial) await api.put(`/products/${initial.id}`, body);
       else await api.post('/products', body);
-      await reload('products');
+      await reload('products', 'market');
       toast(initial ? 'Produto atualizado.' : 'Produto criado.');
       onClose();
     } catch (e) {
@@ -239,6 +253,8 @@ function ProductForm({ initial, template, onClose }: { initial: Product | null; 
     <Modal
       open
       onClose={onClose}
+      footerNote={error ?? (touched && !valid ? 'Confira os campos destacados em vermelho.' : null)}
+      dirty={dirty}
       size="xl"
       title={initial ? `Editar ${initial.name}` : 'Novo produto'}
       footer={
@@ -355,7 +371,31 @@ function ProductForm({ initial, template, onClose }: { initial: Product | null; 
           </Field>
 
           {variants.length > 1 && (
-            <Button variant="danger" size="sm" icon={<Trash2 className="size-3.5" />} onClick={() => { setVariants(variants.filter((x) => x.key !== v.key)); setActive(0); }}>
+            <Button
+              variant="danger"
+              size="sm"
+              icon={<Trash2 className="size-3.5" />}
+              onClick={async () => {
+                const u = v.id ? usage.get(v.id) : undefined;
+                if (u && (u.sales > 0 || u.market > 0)) {
+                  const ok = await confirm({
+                    title: `Remover “${v.name}”`,
+                    message: (
+                      <>
+                        Este tamanho tem {u.sales} venda(s) e {u.market} preço(s) de mercado. Ao salvar, as vendas continuam no
+                        Financeiro (sem o tamanho) e os preços de mercado deste tamanho serão apagados. Para só parar de vender,
+                        prefira marcar o produto como Inativo.
+                      </>
+                    ),
+                    confirmLabel: 'Remover tamanho',
+                    danger: true,
+                  });
+                  if (!ok) return;
+                }
+                setVariants(variants.filter((x) => x.key !== v.key));
+                setActive(0);
+              }}
+            >
               Remover tamanho “{v.name || 'sem nome'}”
             </Button>
           )}

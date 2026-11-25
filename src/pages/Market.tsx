@@ -6,24 +6,26 @@ import { api } from '../lib/api.ts';
 import { competitivePrice, MARKET_MIN_SAMPLES, marketStats } from '../../shared/calc.ts';
 import { date, money, parseNum, pct, todayISO } from '../lib/format.ts';
 import { usePricingRows } from './Pricing.tsx';
+import { MARKET_MAX_AGE_DAYS, marketCutoff, marketEntriesFor } from '../lib/market.ts';
 import {
-  Badge, Button, Card, cx, Empty, Field, IconButton, Input, Modal, Notice, NumInput, PageHeader, Select, TableWrap, Td, Textarea, Th, useFeedback,
+  Badge, Button, Card, cx, Empty, Field, IconButton, Input, Modal, Notice, NumInput, PageHeader, Select, TableWrap, Td, Textarea, Th, useDirty, useFeedback,
 } from '../components/ui.tsx';
-
-const MAX_AGE_DAYS = 180;
 
 export default function Market() {
   const { products, market, settings, reload } = useStore();
   const rows = usePricingRows();
   const [params, setParams] = useSearchParams();
-  const productId = Number(params.get('p')) || products[0]?.id || null;
-  const product = products.find((p) => p.id === productId) ?? null;
+  const requested = Number(params.get('p'));
+  // Produto pedido no endereço pode ter sido excluído: usa o primeiro.
+  const product = products.find((p) => p.id === requested) ?? products[0] ?? null;
+  const productId = product?.id ?? null;
   const [variantId, setVariantId] = useState<number | 'all'>('all');
   const [adding, setAdding] = useState(false);
   const [onlyRecent, setOnlyRecent] = useState(true);
   const { toast, confirm } = useFeedback();
 
-  const cutoff = new Date(Date.now() - MAX_AGE_DAYS * 864e5).toISOString().slice(0, 10);
+  const cutoff = marketCutoff();
+  // Lista à direita: todos os preços do filtro (incluindo os sem tamanho).
   const entries = useMemo(
     () =>
       market.filter(
@@ -34,8 +36,8 @@ export default function Market() {
       ),
     [market, productId, variantId, onlyRecent, cutoff],
   );
-  const stats = marketStats(entries.map((e) => e.price));
   const variantRows = rows.filter((r) => r.product.id === productId && (variantId === 'all' || r.variant.id === variantId));
+  const multiSize = (product?.variants.length ?? 0) > 1;
 
   const remove = async (id: number) => {
     if (!(await confirm({ title: 'Remover preço', message: 'Remover este preço de concorrente?', confirmLabel: 'Remover', danger: true }))) return;
@@ -72,17 +74,19 @@ export default function Market() {
             )}
             <label className="flex items-center gap-2 text-[13px] text-ink-2 sm:ml-2">
               <input type="checkbox" checked={onlyRecent} onChange={(e) => setOnlyRecent(e.target.checked)} className="accent-[#1c1917]" />
-              Só últimos {MAX_AGE_DAYS} dias
+              Só últimos {MARKET_MAX_AGE_DAYS} dias
             </label>
           </div>
 
-          {product && product.variants.length > 1 && variantId === 'all' && (
-            <Notice className="mb-4">Tamanhos diferentes têm preços diferentes. Selecione um tamanho para uma comparação justa.</Notice>
+          {multiSize && (
+            <Notice className="mb-4">Cada tamanho é comparado só com preços registrados para o mesmo tamanho.</Notice>
           )}
 
           <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
             <div className="space-y-4">
               {variantRows.map((r) => {
+                const own = marketEntriesFor(market, r.product, r.variant.id, onlyRecent);
+                const stats = marketStats(own.map((e) => e.price));
                 const adv = stats && r.pricing ? competitivePrice(r.pricing, stats, settings.roundTo) : null;
                 return (
                   <Card key={r.variant.id} title={`${r.product.name} · ${r.variant.name}`}>
@@ -121,7 +125,7 @@ export default function Market() {
                           </>
                         ) : (
                           <Notice className="mt-4">
-                            Comparação indisponível: {entries.length === 0 ? 'nenhum preço de concorrente registrado' : `há ${entries.length} preço(s); são necessários pelo menos ${MARKET_MIN_SAMPLES}`} para este filtro.
+                            Comparação indisponível: {own.length === 0 ? 'nenhum preço de concorrente registrado para este tamanho' : `há ${own.length} preço(s) para este tamanho; são necessários pelo menos ${MARKET_MIN_SAMPLES}`}.
                             Pesquise cardápios de confeitarias da sua região{settings.city ? ` (${settings.city})` : ''} e registre com a fonte.
                           </Notice>
                         )}
@@ -149,6 +153,9 @@ export default function Market() {
                             <div className="text-[11.5px] text-muted">
                               {[v?.name, e.region, date(e.observedAt)].filter(Boolean).join(' · ')}
                             </div>
+                            {multiSize && e.variantId === null && (
+                              <Badge tone="warn" className="mt-1">Sem tamanho: não entra na comparação</Badge>
+                            )}
                             <div className="mt-0.5 max-w-[220px] truncate text-[11.5px] text-muted">
                               {isUrl ? <a href={e.source} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-1 text-accent hover:underline">Fonte <ExternalLink className="size-3" /></a> : `Fonte: ${e.source}`}
                             </div>
@@ -210,7 +217,7 @@ function MarketForm({ productId, defaultVariant, onClose }: { productId: number;
   const { toast } = useFeedback();
   const product = products.find((p) => p.id === productId)!;
   const [f, setF] = useState({
-    variantId: defaultVariant ?? (product.variants.length === 1 ? product.variants[0].id : ('' as number | '')),
+    variantId: (defaultVariant ?? product.variants[0]?.id ?? '') as number | '',
     competitor: '',
     region: settings.city,
     price: '',
@@ -221,11 +228,13 @@ function MarketForm({ productId, defaultVariant, onClose }: { productId: number;
   const [touched, setTouched] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const dirty = useDirty(f);
   const price = parseNum(f.price);
   const errs = {
     competitor: !f.competitor.trim() ? 'Informe o concorrente.' : null,
     price: !(price > 0) ? 'Informe o preço.' : null,
     source: !f.source.trim() ? 'Informe onde viu o preço (link, cardápio, visita…).' : null,
+    variant: f.variantId === '' ? 'Escolha o tamanho equivalente.' : null,
   };
   const valid = Object.values(errs).every((e) => !e);
 
@@ -251,6 +260,8 @@ function MarketForm({ productId, defaultVariant, onClose }: { productId: number;
     <Modal
       open
       onClose={onClose}
+      footerNote={error ?? (touched && !valid ? 'Confira os campos destacados em vermelho.' : null)}
+      dirty={dirty}
       title={`Registrar preço · ${product.name}`}
       description="Use apenas preços que você viu de fato. Informe a fonte para poder conferir depois."
       footer={<><Button onClick={onClose}>Cancelar</Button><Button variant="primary" loading={saving} onClick={submit}>Registrar</Button></>}
@@ -261,9 +272,8 @@ function MarketForm({ productId, defaultVariant, onClose }: { productId: number;
         <Field label="Concorrente" error={touched ? errs.competitor : null}>
           <Input value={f.competitor} onChange={(e) => setF({ ...f, competitor: e.target.value })} placeholder="Nome da confeitaria" maxLength={80} />
         </Field>
-        <Field label="Tamanho equivalente">
+        <Field label="Tamanho equivalente" error={touched ? errs.variant : null} hint={product.variants.length > 1 ? 'Compare só o mesmo tamanho (unidade com unidade, caixa com caixa)' : undefined}>
           <Select value={f.variantId} onChange={(e) => setF({ ...f, variantId: e.target.value ? Number(e.target.value) : '' })}>
-            <option value="">Geral / não sei</option>
             {product.variants.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
           </Select>
         </Field>
@@ -271,7 +281,7 @@ function MarketForm({ productId, defaultVariant, onClose }: { productId: number;
           <NumInput value={f.price} onChange={(v) => setF({ ...f, price: v })} prefix="R$" />
         </Field>
         <Field label="Data em que viu">
-          <Input type="date" value={f.observedAt} max={todayISO()} onChange={(e) => setF({ ...f, observedAt: e.target.value })} />
+          <Input type="date" value={f.observedAt} min="2000-01-01" max={todayISO()} onChange={(e) => setF({ ...f, observedAt: e.target.value })} />
         </Field>
         <Field label="Região / bairro">
           <Input value={f.region} onChange={(e) => setF({ ...f, region: e.target.value })} maxLength={80} />

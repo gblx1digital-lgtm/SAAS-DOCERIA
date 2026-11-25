@@ -7,10 +7,11 @@ import { EXTERNAL_CHANGE_EVENT } from '../lib/db-client.ts';
 import { baseUnitOf, compatibleUnits } from '../../shared/calc.ts';
 import { PAYMENT_LABEL, TX_CATEGORY_LABEL, type PaymentMethod, type Transaction, type TxCategory, type Unit } from '../../shared/types.ts';
 import { date, money, number, parseNum, toField, todayISO } from '../lib/format.ts';
+import { latestAllowedDate } from '../../shared/dates.ts';
 import { bucketLabel, PeriodPicker, usePeriod } from '../components/Period.tsx';
 import type { Dashboard } from '../../core/dashboard.ts';
 import {
-  Badge, Button, Card, cx, Empty, Field, IconButton, Input, Modal, Notice, NumInput, PageHeader, Select, Stat, TableWrap, Td, Th, useFeedback,
+  Badge, Button, Card, cx, Empty, Field, IconButton, Input, Modal, Notice, NumInput, PageHeader, Select, Stat, TableWrap, Td, Th, useDirty, useFeedback,
 } from '../components/ui.tsx';
 import { IngredientSelect } from '../components/LineEditor.tsx';
 
@@ -52,23 +53,36 @@ export default function Finance() {
   const [form, setForm] = useState<{ kind: FormKind; tx?: Transaction } | null>(null);
   const [filter, setFilter] = useState<'' | TxCategory>('');
   const { toast, confirm } = useFeedback();
-  const { reload, settings } = useStore();
+  const { reload, settings, ctx } = useStore();
+  const ingredientsById = ctx.ingredients;
 
   const list = filter ? txs.filter((t) => t.category === filter) : txs;
   const t = data?.totals;
 
   const remove = async (tx: Transaction) => {
-    if (!(await confirm({ title: 'Excluir lançamento', message: <>Excluir <b>{tx.description}</b> de {money(tx.amount)}?</>, confirmLabel: 'Excluir', danger: true }))) return;
+    const ingName = tx.purchase && tx.ingredientId ? ingredientsById.get(tx.ingredientId)?.name : undefined;
+    if (!(await confirm({
+      title: 'Excluir lançamento',
+      message: (
+        <>
+          Excluir <b>{tx.description}</b> de {money(tx.amount)}?
+          {ingName && <> O preço de <b>{ingName}</b> volta ao da compra anterior.</>}
+        </>
+      ),
+      confirmLabel: 'Excluir',
+      danger: true,
+    }))) return;
     try {
       await api.del(`/transactions/${tx.id}`);
       await load();
+      if (tx.purchase) await reload('ingredients', 'history');
       toast('Lançamento excluído.');
     } catch (e) {
       toast((e as Error).message, 'neg');
     }
   };
 
-  const chart = useMemo(() => (data?.series ?? []).map((s) => ({ ...s, label: bucketLabel(s.bucket, period.gran) })), [data, period.gran]);
+  const chart = useMemo(() => (data?.series ?? []).map((s) => ({ ...s, label: bucketLabel(s.bucket, data!.period.granularity) })), [data]);
 
   return (
     <>
@@ -96,7 +110,7 @@ export default function Finance() {
           </div>
 
           <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
-            <Card title="Fluxo de caixa" subtitle="Entradas e saídas no período">
+            <Card title="Fluxo de caixa" subtitle={`Entradas e saídas no período${data && data.period.granularity !== data.period.requestedGranularity ? ` (agrupado por ${data.period.granularity === 'week' ? 'semana' : 'mês'}: período longo)` : ''}`}>
               {chart.every((c) => !c.entradas && !c.saidas) ? (
                 <Empty title="Sem lançamentos no período" />
               ) : (
@@ -121,7 +135,8 @@ export default function Finance() {
                 <Line label="Outras entradas" value={t.otherIncome} />
                 <Line label="Taxas de pagamento" value={-t.fees} />
                 <Line label="Impostos estimados" value={-t.taxes} />
-                <Line label="Custo dos produtos vendidos" value={-t.cogs} />
+                <Line label="Ingredientes e embalagens" value={-t.materials} />
+                <Line label="Mão de obra (tempo de produção)" value={-t.labor} />
                 <Line label="Despesas fixas" value={-t.fixedExpenses} />
                 <Line label="Despesas variáveis" value={-t.variableExpenses} />
                 <Line label="Outras saídas" value={-t.otherExpenses} />
@@ -131,7 +146,7 @@ export default function Finance() {
                 </div>
               </dl>
               <p className="mt-3 text-[11.5px] text-muted">
-                Compras de ingredientes ({money(t.purchases)}) entram no caixa, mas no resultado o que conta é o custo dos ingredientes usados nos produtos vendidos, para não contar duas vezes.
+                Compras de ingredientes ({money(t.purchases)}) entram no caixa; no resultado conta o que foi usado nas vendas. Sua mão de obra já entra pelo tempo de produção (não lance o pró-labore como despesa); aluguel, contas e outras despesas entram pelo que foi lançado, para nada ser descontado duas vezes.
               </p>
             </Card>
           </div>
@@ -151,33 +166,41 @@ export default function Finance() {
         ) : (
           <TableWrap>
             <thead>
-              <tr><Th>Data</Th><Th>Descrição</Th><Th className="hidden md:table-cell">Categoria</Th><Th align="right">Valor</Th><Th align="right" className="hidden sm:table-cell">Lucro</Th><Th /></tr>
+              <tr><Th className="hidden sm:table-cell">Data</Th><Th>Descrição</Th><Th className="hidden md:table-cell">Categoria</Th><Th align="right">Valor</Th><Th align="right" className="hidden sm:table-cell">Lucro</Th><Th /></tr>
             </thead>
             <tbody>
               {list.map((tx) => {
+                const meta = [
+                  tx.quantity ? `${number(tx.quantity)} un` : null,
+                  tx.paymentMethod ? PAYMENT_LABEL[tx.paymentMethod] : null,
+                  tx.fee ? `taxa ${money(tx.fee)}` : null,
+                ].filter(Boolean) as string[];
+                // Lucro da venda com o custo completo da época (igual à Precificação).
                 const profit = tx.category === 'venda' && tx.unitCost !== null && tx.quantity !== null
-                  ? tx.amount - tx.fee - (tx.amount * settings.taxPct) / 100 - tx.unitCost * tx.quantity
+                  ? tx.amount - tx.fee - (tx.tax ?? (tx.amount * settings.taxPct) / 100) - tx.unitCost * tx.quantity
                   : null;
                 return (
                   <tr key={tx.id} className="hover:bg-subtle/50">
-                    <Td className="whitespace-nowrap text-ink-2">{date(tx.date)}</Td>
-                    <Td>
+                    <Td className="hidden whitespace-nowrap text-ink-2 sm:table-cell">{date(tx.date)}</Td>
+                    <Td className="max-w-0 w-full">
                       <div className="flex items-center gap-2">
-                        <span className={cx('flex size-6 shrink-0 items-center justify-center rounded-md', tx.type === 'entrada' ? 'bg-pos-soft text-pos' : 'bg-subtle text-muted')}>
+                        <span className={cx('hidden size-6 shrink-0 items-center justify-center rounded-md sm:flex', tx.type === 'entrada' ? 'bg-pos-soft text-pos' : 'bg-subtle text-muted')}>
                           {tx.type === 'entrada' ? <ArrowDownLeft className="size-3.5" /> : <ArrowUpRight className="size-3.5" />}
                         </span>
                         <div className="min-w-0">
                           <div className="truncate font-medium">{tx.description}</div>
-                          <div className="text-[11.5px] text-muted">
-                            {tx.quantity ? `${number(tx.quantity)} un · ` : ''}
-                            {tx.paymentMethod ? PAYMENT_LABEL[tx.paymentMethod] : ''}
-                            {tx.fee ? ` · taxa ${money(tx.fee)}` : ''}
+                          <div className="truncate text-[11.5px] text-muted">
+                            <span className="sm:hidden">
+                              {date(tx.date).slice(0, 5)}
+                              {meta.length > 0 && ' · '}
+                            </span>
+                            {meta.join(' · ')}
                           </div>
                         </div>
                       </div>
                     </Td>
                     <Td className="hidden md:table-cell"><Badge tone={tx.type === 'entrada' ? 'pos' : 'neutral'}>{TX_CATEGORY_LABEL[tx.category]}</Badge></Td>
-                    <Td align="right" className={cx('font-medium', tx.type === 'saida' && 'text-ink-2')}>{tx.type === 'saida' ? '−' : ''}{money(tx.amount)}</Td>
+                    <Td align="right" className={cx('whitespace-nowrap font-medium', tx.type === 'saida' && 'text-ink-2')}>{tx.type === 'saida' ? '−' : ''}{money(tx.amount)}</Td>
                     <Td align="right" className={cx('hidden sm:table-cell', profit !== null && profit < 0 && 'text-neg')}>{profit === null ? <span className="text-faint">—</span> : money(profit)}</Td>
                     <Td className="w-px whitespace-nowrap">
                       <div className="flex justify-end gap-0.5">
@@ -224,79 +247,117 @@ export function TxForm({ kind, initial, onClose, onSaved }: { kind: FormKind; in
   const { products, ingredients, settings, ctx } = useStore();
   const { toast } = useFeedback();
   const activeProducts = products.filter((p) => p.active || p.id === initial?.productId);
-  const [f, setF] = useState({
-    date: initial?.date ?? todayISO(),
-    category: (initial?.category ?? (kind === 'outro' ? 'despesa_variavel' : kind === 'compra' ? 'compra_ingrediente' : 'venda')) as TxCategory,
-    description: initial?.description ?? '',
-    amount: toField(initial?.amount),
-    productId: (initial?.productId ?? activeProducts[0]?.id ?? '') as number | '',
-    variantId: (initial?.variantId ?? '') as number | '',
-    quantity: toField(initial?.quantity ?? 1),
-    unitPrice: initial && initial.quantity ? toField(Math.round((initial.amount / initial.quantity) * 100) / 100) : '',
-    paymentMethod: (initial?.paymentMethod ?? 'pix') as PaymentMethod,
-    fee: initial ? toField(initial.fee) : '',
-    feeEdited: !!initial,
-    ingredientId: (initial?.ingredientId ?? '') as number | '',
-    updateIngredient: !initial,
-    packs: '1',
-    packageSize: '',
-    unit: 'g' as Unit,
+  /** Venda cujo produto/tamanho foi excluído do cadastro: mantém o que foi gravado. */
+  const orphan = kind === 'venda' && !!initial && initial.variantId === null;
+
+  const [f, setF] = useState(() => {
+    const firstProduct = initial?.productId ? products.find((p) => p.id === initial.productId) : activeProducts[0];
+    const firstVariant = initial?.variantId ? firstProduct?.variants.find((v) => v.id === initial.variantId) : firstProduct?.variants[0];
+    const ing0 = initial?.ingredientId ? ctx.ingredients.get(initial.ingredientId) : undefined;
+    return {
+      date: initial?.date ?? todayISO(),
+      category: (initial?.category ?? (kind === 'outro' ? 'despesa_variavel' : kind === 'compra' ? 'compra_ingrediente' : 'venda')) as TxCategory,
+      description: initial?.description ?? '',
+      amount: toField(initial?.amount),
+      productId: (firstProduct?.id ?? '') as number | '',
+      variantId: (firstVariant?.id ?? '') as number | '',
+      quantity: toField(initial?.quantity ?? 1),
+      unitPrice: initial
+        ? initial.quantity ? toField(Math.round((initial.amount / initial.quantity) * 100) / 100) : ''
+        : toField(firstVariant?.salePrice ?? null),
+      /** Ao editar, mantém o total gravado até mudar quantidade ou preço. */
+      totalEdited: !!initial,
+      total: toField(initial?.amount),
+      paymentMethod: (initial?.paymentMethod ?? 'pix') as PaymentMethod,
+      fee: initial ? toField(initial.fee) : '',
+      /** auto = % das configurações; scaled = taxa gravada proporcional ao novo valor; manual = digitada. */
+      feeMode: (initial ? 'scaled' : 'auto') as 'auto' | 'scaled' | 'manual',
+      ingredientId: (initial?.ingredientId ?? '') as number | '',
+      updateIngredient: initial ? !!initial.purchase : true,
+      packs: toField(initial?.purchase?.packs ?? ing0?.packs ?? 1),
+      packageSize: toField(initial?.purchase?.packageSize ?? ing0?.packageSize ?? null),
+      unit: (initial?.purchase?.unit ?? ing0?.unit ?? 'g') as Unit,
+    };
   });
   const [touched, setTouched] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const dirty = useDirty(f);
   const set = (patch: Partial<typeof f>) => setF((s) => ({ ...s, ...patch }));
 
   const product = products.find((p) => p.id === f.productId);
   const variant = product?.variants.find((v) => v.id === f.variantId);
 
-  // Preenchimentos automáticos
-  useEffect(() => {
-    if (kind !== 'venda' || !product) return;
-    if (!product.variants.some((v) => v.id === f.variantId)) set({ variantId: product.variants[0]?.id ?? '' });
-  }, [kind, product]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => {
-    if (kind !== 'venda' || !variant || initial) return;
-    if (variant.salePrice) set({ unitPrice: toField(variant.salePrice) });
-  }, [variant?.id]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => {
-    if (kind !== 'compra' || f.ingredientId === '') return;
-    const ing = ctx.ingredients.get(f.ingredientId);
-    if (ing) set({ packs: toField(ing.packs), packageSize: toField(ing.packageSize), unit: ing.unit });
-  }, [f.ingredientId]); // eslint-disable-line react-hooks/exhaustive-deps
+  const pickProduct = (id: number) => {
+    const p = products.find((x) => x.id === id);
+    const v = p?.variants[0];
+    set({ productId: id, variantId: v?.id ?? '', unitPrice: v?.salePrice ? toField(v.salePrice) : f.unitPrice, totalEdited: false });
+  };
+  const pickVariant = (id: number) => {
+    const v = product?.variants.find((x) => x.id === id);
+    set({ variantId: id, unitPrice: v?.salePrice ? toField(v.salePrice) : f.unitPrice, totalEdited: false });
+  };
+  const pickIngredient = (id: number | '') => {
+    const ing = id === '' ? undefined : ctx.ingredients.get(id);
+    set({ ingredientId: id, ...(ing ? { packs: toField(ing.packs), packageSize: toField(ing.packageSize), unit: ing.unit } : {}) });
+  };
 
   const qty = parseNum(f.quantity);
   const unitPrice = parseNum(f.unitPrice);
-  const saleTotal = qty > 0 && unitPrice >= 0 ? Math.round(qty * unitPrice * 100) / 100 : NaN;
+  const computedTotal = qty > 0 && unitPrice >= 0 ? Math.round(qty * unitPrice * 100) / 100 : NaN;
+  const saleTotal = f.totalEdited ? parseNum(f.total) : computedTotal;
   const amount = kind === 'venda' ? saleTotal : parseNum(f.amount);
   const feePct = f.paymentMethod === 'pix' ? settings.feePixPct : f.paymentMethod === 'debito' ? settings.feeDebitPct : f.paymentMethod === 'credito' ? settings.feeCreditPct : 0;
   const autoFee = amount > 0 ? Math.round(amount * feePct) / 100 : 0;
-  const fee = f.feeEdited && f.fee.trim() ? parseNum(f.fee) : autoFee;
+  const fee =
+    f.feeMode === 'manual'
+      ? parseNum(f.fee)
+      : f.feeMode === 'scaled' && initial && initial.amount > 0 && amount >= 0
+        ? Math.round(((initial.fee * amount) / initial.amount) * 100) / 100
+        : autoFee;
 
+  const ing = f.ingredientId === '' ? undefined : ctx.ingredients.get(f.ingredientId);
+  const updatingPrice = kind === 'compra' && !!ing && f.updateIngredient;
   const errs: Record<string, string | null> = {
-    date: !f.date ? 'Informe a data.' : null,
-    amount: kind === 'venda' ? (!(unitPrice >= 0) || !f.unitPrice.trim() ? 'Informe o preço.' : null) : !(amount > 0) ? 'Informe o valor.' : null,
+    date: !f.date
+      ? 'Informe a data.'
+      : updatingPrice && f.date > latestAllowedDate()
+        ? 'Para atualizar o preço, a data da compra não pode ser no futuro.'
+        : null,
+    amount:
+      kind === 'venda'
+        ? !(saleTotal >= 0) || (!f.totalEdited && !f.unitPrice.trim())
+          ? 'Informe o preço.'
+          : null
+        : !(amount > 0)
+          ? 'Informe o valor.'
+          : null,
     quantity: kind === 'venda' && !(qty > 0) ? 'Quantidade inválida.' : null,
-    product: kind === 'venda' && (!product || !variant) ? 'Selecione o produto.' : null,
+    product: kind === 'venda' && !orphan && (!product || !variant) ? 'Selecione o produto.' : null,
     description: kind === 'outro' && !f.description.trim() ? 'Descreva o lançamento.' : kind === 'compra' && f.ingredientId === '' && !f.description.trim() ? 'Selecione o ingrediente ou descreva a compra.' : null,
-    fee: kind === 'venda' && !(fee >= 0) ? 'Taxa inválida.' : null,
-    pack: kind === 'compra' && f.ingredientId !== '' && f.updateIngredient && (!(parseNum(f.packs) > 0) || !(parseNum(f.packageSize) > 0)) ? 'Informe quantidade e conteúdo.' : null,
+    fee: kind === 'venda' && !(fee >= 0) ? 'Taxa inválida.' : kind === 'venda' && fee > saleTotal ? 'A taxa não pode ser maior que a venda.' : null,
+    pack: updatingPrice && (!(parseNum(f.packs) > 0) || !(parseNum(f.packageSize) > 0)) ? 'Informe quantas embalagens e quanto vem em cada.' : null,
   };
   const valid = Object.values(errs).every((e) => !e);
+  const noProducts = kind === 'venda' && !orphan && activeProducts.length === 0;
 
   const submit = async () => {
-    if (saving) return;
+    if (saving || noProducts) return;
     setTouched(true);
     if (!valid) return;
     setSaving(true);
     setError(null);
     let body: Record<string, unknown>;
     if (kind === 'venda') {
-      body = { category: 'venda', date: f.date, productId: f.productId, variantId: f.variantId, quantity: qty, amount: saleTotal, paymentMethod: f.paymentMethod, fee, description: f.description };
+      body = {
+        category: 'venda', date: f.date,
+        productId: orphan ? null : f.productId, variantId: orphan ? null : f.variantId,
+        quantity: qty, amount: saleTotal, paymentMethod: f.paymentMethod, fee, description: f.description,
+      };
     } else if (kind === 'compra') {
       body = {
         category: 'compra_ingrediente', date: f.date, amount, description: f.description, ingredientId: f.ingredientId === '' ? null : f.ingredientId, paymentMethod: f.paymentMethod,
-        updateIngredient: f.ingredientId !== '' && f.updateIngredient ? { packs: parseNum(f.packs), packageSize: parseNum(f.packageSize), unit: f.unit } : null,
+        updateIngredient: updatingPrice ? { packs: parseNum(f.packs), packageSize: parseNum(f.packageSize), unit: f.unit } : null,
       };
     } else {
       body = { category: f.category, date: f.date, amount, description: f.description, paymentMethod: f.paymentMethod };
@@ -304,7 +365,7 @@ export function TxForm({ kind, initial, onClose, onSaved }: { kind: FormKind; in
     try {
       if (initial) await api.put(`/transactions/${initial.id}`, body);
       else await api.post('/transactions', body);
-      await onSaved(kind === 'compra' && !!body.updateIngredient);
+      await onSaved(kind === 'compra' && (!!body.updateIngredient || !!initial?.purchase));
       toast(initial ? 'Lançamento atualizado.' : kind === 'venda' ? 'Venda registrada.' : 'Lançamento registrado.');
       onClose();
     } catch (e) {
@@ -315,45 +376,67 @@ export function TxForm({ kind, initial, onClose, onSaved }: { kind: FormKind; in
   };
 
   const title = initial ? 'Editar lançamento' : kind === 'venda' ? 'Registrar venda' : kind === 'compra' ? 'Compra de ingredientes' : 'Despesa ou entrada';
-  const ing = f.ingredientId === '' ? undefined : ctx.ingredients.get(f.ingredientId);
+  const backdated = updatingPrice && !!ing && f.date < ing.lastPurchaseDate && !initial?.purchase;
 
   return (
-    <Modal open onClose={onClose} title={title} footer={<><Button onClick={onClose}>Cancelar</Button><Button variant="primary" loading={saving} onClick={submit}>{initial ? 'Salvar' : 'Registrar'}</Button></>}>
+    <Modal
+      open
+      onClose={onClose}
+      title={title}
+      footerNote={error ?? (touched && !valid ? 'Confira os campos destacados em vermelho.' : null)}
+      dirty={dirty}
+      footer={
+        <>
+          <Button onClick={onClose}>Cancelar</Button>
+          <Button variant="primary" loading={saving} onClick={submit} disabled={noProducts}>
+            {initial ? 'Salvar' : 'Registrar'}
+          </Button>
+        </>
+      }
+    >
       <form className="grid grid-cols-1 gap-4 sm:grid-cols-2" onSubmit={(e) => { e.preventDefault(); submit(); }}>
         <button type="submit" hidden />
-        {error && <Notice tone="neg" className="sm:col-span-2">{error}</Notice>}
 
         {kind === 'venda' && (
-          activeProducts.length === 0 ? (
+          orphan ? (
+            <Notice className="sm:col-span-2">
+              O produto desta venda foi excluído do cadastro. Você pode corrigir data, quantidade, valor e pagamento; o custo
+              gravado na época da venda é mantido.
+            </Notice>
+          ) : noProducts ? (
             <Notice tone="warn" className="sm:col-span-2">Cadastre um produto antes de registrar vendas.</Notice>
           ) : (
             <>
               <Field label="Produto" error={touched ? errs.product : null}>
-                <Select value={f.productId} onChange={(e) => set({ productId: Number(e.target.value) })}>
+                <Select value={f.productId} onChange={(e) => pickProduct(Number(e.target.value))}>
                   {activeProducts.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
                 </Select>
               </Field>
               <Field label="Tamanho">
-                <Select value={f.variantId} onChange={(e) => set({ variantId: Number(e.target.value) })}>
+                <Select value={f.variantId} onChange={(e) => pickVariant(Number(e.target.value))}>
                   {product?.variants.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
                 </Select>
               </Field>
-              <Field label="Quantidade" error={touched ? errs.quantity : null}>
-                <NumInput value={f.quantity} onChange={(v) => set({ quantity: v })} />
-              </Field>
-              <Field label="Preço unitário" error={touched ? errs.amount : null} hint={variant && !variant.salePrice ? 'Defina “meu preço” no produto para preencher automaticamente.' : undefined}>
-                <NumInput value={f.unitPrice} onChange={(v) => set({ unitPrice: v })} prefix="R$" />
-              </Field>
             </>
           )
+        )}
+        {kind === 'venda' && !noProducts && (
+          <>
+            <Field label="Quantidade" error={touched ? errs.quantity : null}>
+              <NumInput value={f.quantity} onChange={(v) => set({ quantity: v, totalEdited: false })} />
+            </Field>
+            <Field label="Preço unitário" error={touched && !f.totalEdited ? errs.amount : null} hint={!orphan && variant && !variant.salePrice ? 'Defina “meu preço” no produto para preencher automaticamente.' : undefined}>
+              <NumInput value={f.unitPrice} onChange={(v) => set({ unitPrice: v, totalEdited: false })} prefix="R$" />
+            </Field>
+          </>
         )}
 
         {kind === 'compra' && (
           <>
             <Field label="Ingrediente" hint="Opcional — deixe vazio para compras gerais" className="sm:col-span-2">
-              <IngredientSelect value={f.ingredientId} onChange={(id) => set({ ingredientId: id })} />
+              <IngredientSelect value={f.ingredientId} onChange={pickIngredient} />
             </Field>
-            {ing && !initial && (
+            {ing && (
               <div className="rounded-lg border border-line bg-subtle/50 p-3 sm:col-span-2">
                 <label className="flex items-center gap-2 text-[13px] font-medium">
                   <input type="checkbox" checked={f.updateIngredient} onChange={(e) => set({ updateIngredient: e.target.checked })} className="accent-[#1c1917]" />
@@ -361,9 +444,9 @@ export function TxForm({ kind, initial, onClose, onSaved }: { kind: FormKind; in
                 </label>
                 {f.updateIngredient && (
                   <div className="mt-3 grid grid-cols-3 gap-2">
-                    <Field label="Embalagens"><NumInput value={f.packs} onChange={(v) => set({ packs: v })} /></Field>
-                    <Field label="Conteúdo"><NumInput value={f.packageSize} onChange={(v) => set({ packageSize: v })} /></Field>
-                    <Field label="Unidade">
+                    <Field label="Quantas embalagens"><NumInput value={f.packs} onChange={(v) => set({ packs: v })} /></Field>
+                    <Field label="Quanto vem em cada"><NumInput value={f.packageSize} onChange={(v) => set({ packageSize: v })} /></Field>
+                    <Field label="Medida">
                       <Select value={f.unit} onChange={(e) => set({ unit: e.target.value as Unit })}>
                         {compatibleUnits(ing.unit).map((u) => <option key={u}>{u}</option>)}
                       </Select>
@@ -371,10 +454,16 @@ export function TxForm({ kind, initial, onClose, onSaved }: { kind: FormKind; in
                     {touched && errs.pack && <div className="col-span-3 text-[12px] text-neg">{errs.pack}</div>}
                     {amount > 0 && parseNum(f.packs) > 0 && parseNum(f.packageSize) > 0 && (
                       <div className="col-span-3 text-[12px] text-muted">
-                        Novo custo: {money(amount / (parseNum(f.packs) * parseNum(f.packageSize) * (f.unit === 'kg' || f.unit === 'l' ? 1000 : 1)) * (baseUnitOf(f.unit) === 'un' ? 1 : 1000))} por {baseUnitOf(f.unit) === 'g' ? 'kg' : baseUnitOf(f.unit) === 'ml' ? 'L' : 'un'}. Receitas e produtos serão recalculados.
+                        Custo desta compra: {money(amount / (parseNum(f.packs) * parseNum(f.packageSize) * (f.unit === 'kg' || f.unit === 'l' ? 1000 : 1)) * (baseUnitOf(f.unit) === 'un' ? 1 : 1000))} por {baseUnitOf(f.unit) === 'g' ? 'kg' : baseUnitOf(f.unit) === 'ml' ? 'L' : 'un'}.{' '}
+                        {backdated
+                          ? `Compra anterior à última registrada (${date(ing.lastPurchaseDate)}): entra no histórico e o preço atual continua o da compra mais recente.`
+                          : 'Receitas e produtos serão recalculados.'}
                       </div>
                     )}
                   </div>
+                )}
+                {initial?.purchase && !f.updateIngredient && (
+                  <p className="mt-2 text-[12px] text-muted">Ao salvar, esta compra deixa de contar no preço de {ing.name} (volta ao da compra anterior).</p>
                 )}
               </div>
             )}
@@ -398,26 +487,43 @@ export function TxForm({ kind, initial, onClose, onSaved }: { kind: FormKind; in
           </Field>
         )}
         <Field label="Data" error={touched ? errs.date : null}>
-          <Input type="date" value={f.date} onChange={(e) => set({ date: e.target.value })} />
+          <Input type="date" value={f.date} min="2000-01-01" max={updatingPrice ? todayISO() : undefined} onChange={(e) => set({ date: e.target.value })} />
         </Field>
         <Field label="Forma de pagamento">
-          <Select value={f.paymentMethod} onChange={(e) => set({ paymentMethod: e.target.value as PaymentMethod, feeEdited: false, fee: '' })}>
+          <Select value={f.paymentMethod} onChange={(e) => set({ paymentMethod: e.target.value as PaymentMethod, feeMode: 'auto', fee: '' })}>
             {Object.entries(PAYMENT_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
           </Select>
         </Field>
-        {kind === 'venda' && (
-          <Field label="Taxa cobrada" error={touched ? errs.fee : null} hint={!f.feeEdited ? `Automática: ${number(feePct)}% (configurações)` : undefined}>
-            <NumInput value={f.feeEdited ? f.fee : toField(autoFee)} onChange={(v) => set({ fee: v, feeEdited: true })} prefix="R$" />
+        {kind === 'venda' && !noProducts && (
+          <Field
+            label="Taxa cobrada"
+            error={touched ? errs.fee : null}
+            hint={f.feeMode === 'auto' ? `Automática: ${number(feePct)}% (configurações)` : f.feeMode === 'scaled' ? 'Proporcional à taxa gravada' : undefined}
+          >
+            <NumInput value={f.feeMode === 'manual' ? f.fee : toField(fee)} onChange={(v) => set({ fee: v, feeMode: 'manual' })} prefix="R$" />
           </Field>
         )}
         <Field label="Descrição" error={touched ? errs.description : null} className="sm:col-span-2" hint={kind === 'venda' ? 'Opcional (cliente, encomenda…)' : undefined}>
           <Input value={f.description} onChange={(e) => set({ description: e.target.value })} maxLength={200} />
         </Field>
 
-        {kind === 'venda' && saleTotal > 0 && (
-          <div className="flex items-baseline justify-between rounded-lg border border-line bg-subtle/50 px-3 py-2.5 sm:col-span-2">
-            <span className="text-[12.5px] text-muted">Total da venda{fee > 0 ? ` (você recebe ${money(saleTotal - fee)})` : ''}</span>
-            <span className="num text-[17px] font-semibold">{money(saleTotal)}</span>
+        {kind === 'venda' && !noProducts && (
+          <div className="rounded-lg border border-line bg-subtle/50 px-3 py-2.5 sm:col-span-2">
+            <div className="flex items-center justify-between gap-3">
+              <label htmlFor="sale-total" className="text-[12.5px] text-muted">
+                Total da venda{fee > 0 && saleTotal > 0 ? ` (você recebe ${money(saleTotal - fee)})` : ''}
+              </label>
+              <div className="w-36">
+                <NumInput
+                  id="sale-total"
+                  value={f.totalEdited ? f.total : toField(Number.isFinite(computedTotal) ? computedTotal : null)}
+                  onChange={(v) => set({ total: v, totalEdited: true })}
+                  prefix="R$"
+                  aria-label="Total da venda"
+                />
+              </div>
+            </div>
+            {f.totalEdited && !initial && <p className="mt-1 text-[11.5px] text-muted">Total digitado à mão (desconto ou acréscimo).</p>}
           </div>
         )}
         {ingredients.length === 0 && kind === 'compra' && <Notice className="sm:col-span-2">Nenhum ingrediente cadastrado; registre como compra geral com descrição.</Notice>}

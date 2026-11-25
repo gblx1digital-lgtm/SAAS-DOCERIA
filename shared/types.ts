@@ -251,8 +251,16 @@ export interface Transaction {
   productId: number | null;
   variantId: number | null;
   quantity: number | null;
-  /** Custo de produção por unidade no momento da venda (R$). */
+  /** Custo de produção completo por unidade no momento da venda (R$), usado na precificação. */
   unitCost: number | null;
+  /** Ingredientes + embalagens + desperdício por unidade no momento da venda (R$). */
+  unitMaterialCost: number | null;
+  /** Mão de obra por unidade (tempo de produção) no momento da venda (R$). */
+  unitLaborCost: number | null;
+  /** Imposto da venda no momento do registro (R$). */
+  tax: number | null;
   ingredientId: number | null;
+  /** Compra que atualizou o preço do ingrediente (embalagens e medida usadas). */
+  purchase: { packs: number; packageSize: number; unit: Unit } | null;
   createdAt: string;
 }

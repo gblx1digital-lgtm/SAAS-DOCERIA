@@ -17,7 +17,7 @@ export interface DB {
 }
 
 /** Versão do esquema gravada em PRAGMA user_version. */
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 export const REQUIRED_TABLES = [
   'settings',
@@ -262,7 +262,17 @@ function migrate(db: SqlJsDB) {
       'Estes dados foram criados por uma versão mais nova do sistema. Atualize o site antes de abri-los.',
     );
   }
-  // Migrações futuras: if (current < 2) { ... }
+  if (current < 2) {
+    // v2: custos e imposto guardados no momento da venda; histórico de preço ligado à compra que o gerou.
+    const has = (table: string) => new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((r) => String(r.name)));
+    const tx = has('transactions');
+    if (!tx.has('unit_material_cost')) db.exec('ALTER TABLE transactions ADD COLUMN unit_material_cost REAL');
+    if (!tx.has('unit_labor_cost')) db.exec('ALTER TABLE transactions ADD COLUMN unit_labor_cost REAL');
+    if (!tx.has('tax')) db.exec('ALTER TABLE transactions ADD COLUMN tax REAL');
+    if (!has('ingredient_price_history').has('transaction_id'))
+      db.exec('ALTER TABLE ingredient_price_history ADD COLUMN transaction_id INTEGER');
+    db.exec('CREATE INDEX IF NOT EXISTS history_tx ON ingredient_price_history (transaction_id)');
+  }
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION};`);
   db.exec("INSERT OR IGNORE INTO app_meta (key, value) VALUES ('app', 'doceria')");
 }

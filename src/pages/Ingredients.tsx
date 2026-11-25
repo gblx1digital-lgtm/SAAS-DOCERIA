@@ -7,10 +7,21 @@ import { baseUnitOf, costPerBase } from '../../shared/calc.ts';
 import { INGREDIENT_CATEGORIES, UNITS, type Ingredient, type Unit } from '../../shared/types.ts';
 import { date, money, moneyPrecise, number, parseNum, pct, toField, todayISO } from '../lib/format.ts';
 import {
-  Badge, Button, Card, Empty, Field, IconButton, Input, Modal, Notice, NumInput, PageHeader, SearchInput, Select, TableWrap, Td, Textarea, Th, useFeedback,
+  Badge, Button, Card, Empty, Field, IconButton, Input, Modal, Notice, NumInput, PageHeader, SearchInput, Select, TableWrap, Td, Textarea, Th, useDirty, useFeedback,
 } from '../components/ui.tsx';
 
 const UNIT_LABEL: Record<Unit, string> = { g: 'gramas (g)', kg: 'quilos (kg)', ml: 'mililitros (ml)', l: 'litros (L)', un: 'unidades (un)' };
+const UNIT_WORD: Record<Unit, [string, string]> = { g: ['g', 'g'], kg: ['kg', 'kg'], ml: ['ml', 'ml'], l: ['litro', 'litros'], un: ['unidade', 'unidades'] };
+const SIZE_EXAMPLE: Record<Unit, string> = {
+  un: 'Ex.: cartela com 30 ovos → 30',
+  g: 'Ex.: lata de 395 g → 395',
+  kg: 'Ex.: pacote de 1 kg → 1',
+  ml: 'Ex.: caixa de 200 ml → 200',
+  l: 'Ex.: garrafa de 1 litro → 1',
+};
+/** Categorias normalmente compradas por unidade. */
+const UNIT_CATEGORIES = new Set(['Ovos', 'Embalagens']);
+const qty = (v: number, u: Unit) => `${number(v, 3)} ${UNIT_WORD[u][v === 1 ? 0 : 1]}`;
 
 /** Variação do custo por unidade base entre a penúltima e a última compra. */
 export function useLastChange() {
@@ -94,8 +105,8 @@ export default function Ingredients() {
               <tr>
                 <Th>Ingrediente</Th>
                 <Th className="hidden md:table-cell">Fornecedor</Th>
-                <Th>Compra</Th>
-                <Th align="right">Valor pago</Th>
+                <Th className="hidden sm:table-cell">Compra</Th>
+                <Th align="right" className="hidden sm:table-cell">Valor pago</Th>
                 <Th align="right">Custo unitário</Th>
                 <Th align="right" className="hidden sm:table-cell">Variação</Th>
                 <Th className="hidden lg:table-cell">Última compra</Th>
@@ -108,19 +119,23 @@ export default function Ingredients() {
                 const base = baseUnitOf(i.unit);
                 return (
                   <tr key={i.id} className="group hover:bg-subtle/50">
-                    <Td>
-                      <div className="font-medium text-ink">{i.name}</div>
-                      <div className="text-[12px] text-muted">
+                    <Td className="max-w-0 w-full sm:w-auto sm:max-w-none">
+                      <div className="truncate font-medium text-ink">{i.name}</div>
+                      <div className="truncate text-[12px] text-muted">
+                        <span className="sm:hidden">
+                          {i.packs !== 1 && `${number(i.packs)} × `}
+                          {number(i.packageSize, 3)} {i.unit} por {money(i.totalPrice)} ·{' '}
+                        </span>
                         {i.category}
                         {usage.get(i.id) ? ` · em ${usage.get(i.id)} cadastro(s)` : ''}
                       </div>
                     </Td>
                     <Td className="hidden text-ink-2 md:table-cell">{i.supplier || <span className="text-faint">—</span>}</Td>
-                    <Td className="num whitespace-nowrap text-ink-2">
+                    <Td className="num hidden whitespace-nowrap text-ink-2 sm:table-cell">
                       {i.packs !== 1 && `${number(i.packs)} × `}
                       {number(i.packageSize, 3)} {i.unit}
                     </Td>
-                    <Td align="right">{money(i.totalPrice)}</Td>
+                    <Td align="right" className="hidden sm:table-cell">{money(i.totalPrice)}</Td>
                     <Td align="right" className="whitespace-nowrap font-medium">
                       {moneyPrecise(costPerBase(i))}
                       <span className="font-normal text-muted">/{base}</span>
@@ -175,16 +190,21 @@ export function IngredientForm({ initial, onClose, onSaved }: { initial: Ingredi
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [touched, setTouched] = useState(false);
+  /** Se a pessoa já escolheu a medida, a categoria não muda mais a medida sozinha. */
+  const [unitChosen, setUnitChosen] = useState(!!initial);
+  const dirty = useDirty(f);
   const set = <K extends keyof typeof f>(k: K, v: (typeof f)[K]) => setF((s) => ({ ...s, [k]: v }));
+  const setCategory = (category: string) =>
+    setF((s) => ({ ...s, category, unit: unitChosen ? s.unit : UNIT_CATEGORIES.has(category) ? 'un' : 'g' }));
 
   const size = parseNum(f.packageSize);
   const packs = parseNum(f.packs);
   const price = parseNum(f.totalPrice);
   const errs = {
     name: !f.name.trim() ? 'Informe o nome.' : null,
-    packageSize: !(size > 0) ? 'Informe um valor maior que zero.' : null,
-    packs: !(packs > 0) ? 'Mínimo 1.' : null,
-    totalPrice: !(price >= 0) ? 'Informe o valor pago.' : null,
+    packageSize: !(size > 0) ? 'Quanto vem em cada embalagem? (número do rótulo)' : null,
+    packs: !(packs > 0) ? 'Quantas embalagens? (mínimo 1)' : null,
+    totalPrice: !(price >= 0) ? 'Quanto você pagou?' : null,
     lastPurchaseDate: !f.lastPurchaseDate ? 'Informe a data.' : null,
   };
   const valid = Object.values(errs).every((e) => !e);
@@ -198,7 +218,7 @@ export function IngredientForm({ initial, onClose, onSaved }: { initial: Ingredi
     setSaving(true);
     setError(null);
     try {
-      const body = { ...f, packageSize: size, packs, totalPrice: price };
+      const body = { ...f, packageSize: size, packs, totalPrice: price, expectedUpdatedAt: initial?.updatedAt };
       const saved = initial
         ? await api.put<Ingredient>(`/ingredients/${initial.id}`, body)
         : await api.post<Ingredient>('/ingredients', body);
@@ -218,7 +238,9 @@ export function IngredientForm({ initial, onClose, onSaved }: { initial: Ingredi
       open
       onClose={onClose}
       title={initial ? `Editar ${initial.name}` : 'Novo ingrediente'}
-      description="Informe a compra como ela foi feita. Ex.: 2 latas de 395 g por R$ 15,80."
+      description="Conte como foi a compra; o sistema calcula quanto custa cada grama ou unidade."
+      footerNote={error ?? (touched && !valid ? 'Preencha os campos destacados em vermelho.' : null)}
+      dirty={dirty}
       footer={
         <>
           <Button onClick={onClose}>Cancelar</Button>
@@ -233,36 +255,57 @@ export function IngredientForm({ initial, onClose, onSaved }: { initial: Ingredi
           <Input value={f.name} onChange={(e) => set('name', e.target.value)} placeholder="Ex.: Leite condensado" maxLength={120} invalid={touched && !!errs.name} />
         </Field>
         <Field label="Categoria" className="sm:col-span-2">
-          <Select value={f.category} onChange={(e) => set('category', e.target.value)}>
+          <Select value={f.category} onChange={(e) => setCategory(e.target.value)}>
             {INGREDIENT_CATEGORIES.map((c) => <option key={c}>{c}</option>)}
           </Select>
         </Field>
 
         <div className="rounded-lg border border-line bg-subtle/50 p-3 sm:col-span-6">
-          <div className="mb-3 text-[12.5px] font-medium text-ink-2">Compra</div>
+          <div className="text-[13px] font-semibold text-ink">Como foi a compra?</div>
+          <p className="mb-3 mt-0.5 text-[12px] text-muted">Olhe o rótulo da embalagem: lata de 395 g, pacote de 1 kg, cartela com 30 ovos…</p>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <Field label="Qtd. de embalagens" error={touched ? errs.packs : null}>
+            <Field label="Quantas embalagens comprou?" hint="Latas, pacotes, cartelas…" error={touched ? errs.packs : null}>
               <NumInput value={f.packs} onChange={(v) => set('packs', v)} invalid={touched && !!errs.packs} />
             </Field>
-            <Field label="Conteúdo de cada" error={touched ? errs.packageSize : null}>
-              <NumInput value={f.packageSize} onChange={(v) => set('packageSize', v)} placeholder="395" invalid={touched && !!errs.packageSize} />
+            <Field label="Quanto vem em cada uma?" hint={SIZE_EXAMPLE[f.unit]} error={touched ? errs.packageSize : null}>
+              <NumInput value={f.packageSize} onChange={(v) => set('packageSize', v)} placeholder={f.unit === 'un' ? '30' : f.unit === 'g' ? '395' : '1'} invalid={touched && !!errs.packageSize} />
             </Field>
-            <Field label="Unidade">
-              <Select value={f.unit} onChange={(e) => set('unit', e.target.value as Unit)}>
+            <Field label="Medida">
+              <Select
+                value={f.unit}
+                onChange={(e) => {
+                  setUnitChosen(true);
+                  set('unit', e.target.value as Unit);
+                }}
+              >
                 {UNITS.map((u) => <option key={u} value={u}>{UNIT_LABEL[u]}</option>)}
               </Select>
             </Field>
-            <Field label="Valor total pago" error={touched ? errs.totalPrice : null}>
+            <Field label="Quanto pagou por tudo?" hint="O valor de todas as embalagens juntas" error={touched ? errs.totalPrice : null}>
               <NumInput value={f.totalPrice} onChange={(v) => set('totalPrice', v)} prefix="R$" placeholder="0,00" invalid={touched && !!errs.totalPrice} />
             </Field>
           </div>
-          <div className="mt-3 flex items-baseline justify-between gap-3 border-t border-line pt-3">
-            <span className="text-[12.5px] text-muted">
-              {valid ? `${number(packs)} × ${number(size, 3)} ${f.unit} = ${number(packs * size, 3)} ${f.unit}` : 'Preencha a compra para ver o custo'}
-            </span>
-            <span className="num text-[15px] font-semibold text-ink">
-              {preview !== null ? <>{moneyPrecise(preview)}<span className="text-[12.5px] font-normal text-muted"> por {base}</span></> : '—'}
-            </span>
+          <div className="mt-3 rounded-md border border-line bg-surface px-3 py-2.5 text-[13px] leading-relaxed">
+            {preview !== null ? (
+              <>
+                <div className="text-ink-2">
+                  Você comprou <b>{packs === 1 ? '1 embalagem' : `${number(packs)} embalagens`}</b> de <b>{qty(size, f.unit)}</b>
+                  {packs !== 1 && <> = <b>{qty(packs * size, f.unit)}</b></>} por <b>{money(price)}</b>.
+                </div>
+                <div className="mt-0.5 font-semibold text-ink">
+                  {base === 'un' ? (
+                    <>Cada unidade custa <span className="num">{moneyPrecise(preview)}</span>.</>
+                  ) : (
+                    <>
+                      Cada {base === 'g' ? 'grama' : 'ml'} custa <span className="num">{moneyPrecise(preview)}</span>{' '}
+                      <span className="font-normal text-muted">({money(preview * 1000)} o {base === 'g' ? 'quilo' : 'litro'})</span>.
+                    </>
+                  )}
+                </div>
+              </>
+            ) : (
+              <span className="text-muted">Preencha as perguntas acima para ver quanto custa cada {base === 'un' ? 'unidade' : base === 'g' ? 'grama' : 'ml'}.</span>
+            )}
           </div>
         </div>
 

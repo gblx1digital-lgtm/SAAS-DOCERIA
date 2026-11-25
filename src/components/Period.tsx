@@ -15,8 +15,7 @@ const PRESETS = {
   custom: 'Personalizado',
 } as const;
 
-function presetRange(p: string): { from: string; to: string; gran: Gran } {
-  const t = todayISO();
+function presetRange(p: string, t = todayISO()): { from: string; to: string; gran: Gran } {
   const [y, m] = t.split('-').map(Number);
   switch (p) {
     case 'today': return { from: t, to: t, gran: 'day' };
@@ -34,18 +33,43 @@ function presetRange(p: string): { from: string; to: string; gran: Gran } {
 
 const KEY = 'doceria.period';
 
+interface Saved { preset: string; gran: Gran; from?: string; to?: string }
+
+/**
+ * Período escolhido. As datas dos atalhos ("Hoje", "Este mês"…) são recalculadas a cada
+ * uso, então o sistema aberto de um dia para o outro continua mostrando o dia certo.
+ */
 export function usePeriod(): [Period, (p: Period) => void] {
-  const [period, setPeriod] = useState<Period>(() => {
+  const [saved, setSaved] = useState<Saved>(() => {
     try {
-      const saved = JSON.parse(localStorage.getItem(KEY) ?? 'null');
-      if (saved?.preset && saved.preset !== 'custom') return { ...presetRange(saved.preset), preset: saved.preset, gran: saved.gran ?? presetRange(saved.preset).gran };
-      if (saved?.from && saved?.to) return saved;
+      const s = JSON.parse(localStorage.getItem(KEY) ?? 'null');
+      if (s?.preset && s.preset in PRESETS) return { preset: s.preset, gran: s.gran ?? presetRange(s.preset).gran, from: s.from, to: s.to };
     } catch { /* ignorado */ }
-    return { ...presetRange('month'), preset: 'month' };
+    return { preset: 'month', gran: 'day' };
   });
+  const [today, setToday] = useState(todayISO());
+
   useEffect(() => {
-    try { localStorage.setItem(KEY, JSON.stringify(period)); } catch { /* ignorado */ }
-  }, [period]);
+    try { localStorage.setItem(KEY, JSON.stringify(saved)); } catch { /* ignorado */ }
+  }, [saved]);
+
+  // Virou o dia com a página aberta: atualiza os atalhos.
+  useEffect(() => {
+    const check = () => setToday((t) => (t === todayISO() ? t : todayISO()));
+    const id = window.setInterval(check, 60_000);
+    document.addEventListener('visibilitychange', check);
+    window.addEventListener('focus', check);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener('visibilitychange', check);
+      window.removeEventListener('focus', check);
+    };
+  }, []);
+
+  const range =
+    saved.preset === 'custom' && saved.from && saved.to ? { from: saved.from, to: saved.to } : presetRange(saved.preset, today);
+  const period: Period = { preset: saved.preset, gran: saved.gran, from: range.from, to: range.to };
+  const setPeriod = (p: Period) => setSaved({ preset: p.preset, gran: p.gran, ...(p.preset === 'custom' ? { from: p.from, to: p.to } : {}) });
   return [period, setPeriod];
 }
 
@@ -64,8 +88,34 @@ export function PeriodPicker({ value, onChange }: { value: Period; onChange: (p:
       </Select></div>
       {value.preset === 'custom' && (
         <>
-          <div className="w-[150px]"><Input type="date" value={value.from} max={value.to} onChange={(e) => e.target.value && onChange({ ...value, from: e.target.value })} aria-label="De" /></div>
-          <div className="w-[150px]"><Input type="date" value={value.to} min={value.from} onChange={(e) => e.target.value && onChange({ ...value, to: e.target.value })} aria-label="Até" /></div>
+          <div className="w-[150px]">
+            <Input
+              type="date"
+              value={value.from}
+              min="2000-01-01"
+              max={value.to}
+              aria-label="De"
+              onChange={(e) => {
+                const from = e.target.value;
+                if (!from) return;
+                // Nunca deixa o início depois do fim.
+                onChange({ ...value, from, to: from > value.to ? from : value.to });
+              }}
+            />
+          </div>
+          <div className="w-[150px]">
+            <Input
+              type="date"
+              value={value.to}
+              min={value.from}
+              aria-label="Até"
+              onChange={(e) => {
+                const to = e.target.value;
+                if (!to) return;
+                onChange({ ...value, to, from: to < value.from ? to : value.from });
+              }}
+            />
+          </div>
         </>
       )}
       <Segmented

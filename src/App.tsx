@@ -86,7 +86,7 @@ function BackupFooter({ onNavigate }: { onNavigate?: () => void }) {
 }
 
 export default function App() {
-  const { loading, error, storage } = useStore();
+  const { loading, error, storage, reload, refreshStorage } = useStore();
   const [open, setOpen] = useState(false);
   const loc = useLocation();
   useEffect(() => {
@@ -122,9 +122,29 @@ export default function App() {
       )}
 
       <main className="mx-auto max-w-[1240px] px-4 pt-6 pb-24 sm:px-6 lg:px-10 lg:py-9">
-        {error && (
+        {storage.blocked && (
+          <Notice tone="warn" className="sticky top-14 z-20 mb-5 lg:top-4">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <span>{storage.blocked}</span>
+              <button className="shrink-0 rounded-md bg-ink px-3 py-1.5 text-[12.5px] font-medium text-white" onClick={() => window.location.reload()}>
+                Recarregar página
+              </button>
+            </div>
+          </Notice>
+        )}
+        {error && !storage.blocked && (
           <Notice tone="neg" className="mb-5">
-            {error}
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <span>{error}</span>
+              {!storage.unreadable && (
+                <button
+                  className="shrink-0 rounded-md border border-neg/30 bg-surface px-3 py-1.5 text-[12.5px] font-medium text-neg"
+                  onClick={() => void reload().then(refreshStorage)}
+                >
+                  Tentar novamente
+                </button>
+              )}
+            </div>
           </Notice>
         )}
         {!loading && storage.mode === 'memory' && (

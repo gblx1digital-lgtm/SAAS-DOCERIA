@@ -9,6 +9,7 @@ import {
   type TxCategory,
 } from '../shared/types.ts';
 import { buildDashboard } from './dashboard.ts';
+import { latestAllowedDate } from '../shared/dates.ts';
 
 // ───────── Validação ─────────
 
@@ -25,6 +26,8 @@ const isoDate = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/, 'Data inválida (use AAAA-MM-DD).')
   .refine((d) => !Number.isNaN(Date.parse(d + 'T00:00:00Z')), 'Data inválida.');
+const pastDate = (label: string) =>
+  isoDate.refine((d) => d <= latestAllowedDate(), `${label} não pode ser no futuro.`);
 const unit = z.enum(['g', 'kg', 'ml', 'l', 'un'], { errorMap: () => ({ message: 'Unidade inválida.' }) });
 const id = z.coerce.number().int().positive();
 const nullablePositive = (label: string) =>
@@ -40,7 +43,7 @@ const ingredientSchema = z.object({
   packageSize: positive('Conteúdo da embalagem'),
   packs: positive('Quantidade de embalagens'),
   totalPrice: money('Preço'),
-  lastPurchaseDate: isoDate,
+  lastPurchaseDate: pastDate('A data da compra'),
   notes: text(500).default(''),
 });
 
@@ -113,7 +116,7 @@ const marketSchema = z.object({
   region: text(80).default(''),
   price: positive('Preço'),
   source: required('Fonte (onde o preço foi visto)', 300),
-  observedAt: isoDate,
+  observedAt: pastDate('A data em que viu o preço'),
   notes: text(500).default(''),
 });
 
@@ -123,8 +126,9 @@ const txSchema = z.discriminatedUnion('category', [
   z.object({
     category: z.literal('venda'),
     date: isoDate,
-    productId: id,
-    variantId: id,
+    // Nulos só ao editar uma venda cujo produto/tamanho foi excluído (mantém o que foi gravado).
+    productId: z.preprocess((v) => (v === '' || v === undefined ? null : v), id.nullable()),
+    variantId: z.preprocess((v) => (v === '' || v === undefined ? null : v), id.nullable()),
     quantity: positive('Quantidade'),
     amount: money('Valor total'),
     paymentMethod,
@@ -156,6 +160,12 @@ const txSchema = z.discriminatedUnion('category', [
 ] as any);
 
 // ───────── Helpers ─────────
+
+/** Data de atualização que o formulário viu ao abrir (evita sobrescrever alteração feita em outra aba). */
+const expectedOf = (body: unknown): string | undefined => {
+  const v = (body as { expectedUpdatedAt?: unknown } | null)?.expectedUpdatedAt;
+  return typeof v === 'string' ? v : undefined;
+};
 
 function parseId(raw: string | undefined): number {
   const r = id.safeParse(raw);
@@ -247,20 +257,21 @@ export function createApi(db: DB): (req: ApiRequest) => ApiResponse {
   add('GET', '/ingredients/history', () => repo.allHistory(db));
   add('GET', '/ingredients/:id/history', (c) => repo.ingredientHistory(db, parseId(c.params.id)));
   add('POST', '/ingredients', (c) => repo.createIngredient(db, ingredientSchema.parse(c.body)), 201);
-  add('PUT', '/ingredients/:id', (c) => repo.updateIngredient(db, parseId(c.params.id), ingredientSchema.parse(c.body)));
+  add('PUT', '/ingredients/:id', (c) => repo.updateIngredient(db, parseId(c.params.id), ingredientSchema.parse(c.body), expectedOf(c.body)));
   add('DELETE', '/ingredients/:id', (c) => repo.deleteIngredient(db, parseId(c.params.id)));
 
   // Receitas
   add('GET', '/recipes', () => repo.listRecipes(db));
   add('POST', '/recipes', (c) => repo.createRecipe(db, recipeSchema.parse(c.body) as repo.RecipeInput), 201);
-  add('PUT', '/recipes/:id', (c) => repo.updateRecipe(db, parseId(c.params.id), recipeSchema.parse(c.body) as repo.RecipeInput));
+  add('PUT', '/recipes/:id', (c) => repo.updateRecipe(db, parseId(c.params.id), recipeSchema.parse(c.body) as repo.RecipeInput, expectedOf(c.body)));
   add('DELETE', '/recipes/:id', (c) => repo.deleteRecipe(db, parseId(c.params.id)));
 
   // Produtos
   add('GET', '/products', () => repo.listProducts(db));
   add('POST', '/products', (c) => repo.createProduct(db, productSchema.parse(c.body) as repo.ProductInput), 201);
-  add('PUT', '/products/:id', (c) => repo.updateProduct(db, parseId(c.params.id), productSchema.parse(c.body) as repo.ProductInput));
+  add('PUT', '/products/:id', (c) => repo.updateProduct(db, parseId(c.params.id), productSchema.parse(c.body) as repo.ProductInput, expectedOf(c.body)));
   add('DELETE', '/products/:id', (c) => repo.deleteProduct(db, parseId(c.params.id)));
+  add('GET', '/products/:id/usage', (c) => repo.productUsage(db, parseId(c.params.id)));
 
   // Mercado
   add('GET', '/market', () => repo.listMarket(db));
@@ -277,6 +288,7 @@ export function createApi(db: DB): (req: ApiRequest) => ApiResponse {
   const buildTx = (body: unknown, existingId?: number): repo.TxInput => {
     const t = txSchema.parse(body) as any;
     const category = t.category as TxCategory;
+    const prev = existingId ? repo.getTransaction(db, existingId) : null;
     const base: repo.TxInput = {
       date: t.date,
       type: TX_CATEGORY_TYPE[category],
@@ -289,24 +301,62 @@ export function createApi(db: DB): (req: ApiRequest) => ApiResponse {
       variantId: null,
       quantity: null,
       unitCost: null,
+      unitMaterialCost: null,
+      unitLaborCost: null,
+      tax: null,
       ingredientId: null,
     };
     if (category === 'venda') {
+      const settings = repo.getSettings(db);
+      const fee = t.fee ?? feeFor(t.paymentMethod, t.amount, settings);
+      if (fee > t.amount) throw new repo.Conflict('A taxa não pode ser maior que o valor da venda.');
+      // Imposto com a alíquota da época da venda (ao editar) ou a atual (venda nova).
+      const taxRate =
+        prev && prev.category === 'venda' && prev.tax !== null && prev.amount > 0 ? prev.tax / prev.amount : settings.taxPct / 100;
+      const tax = round2(t.amount * taxRate);
+
+      if (t.productId === null || t.variantId === null) {
+        // Venda cujo produto/tamanho foi excluído: mantém produto e custos gravados.
+        if (!prev || prev.category !== 'venda' || prev.variantId !== null) throw new repo.Conflict('Selecione o produto vendido.');
+        return {
+          ...base,
+          description: t.description || prev.description,
+          fee,
+          productId: prev.productId,
+          quantity: t.quantity,
+          unitCost: prev.unitCost,
+          unitMaterialCost: prev.unitMaterialCost,
+          unitLaborCost: prev.unitLaborCost,
+          tax,
+        };
+      }
+
       const product = repo.getProduct(db, t.productId);
       const variant = product.variants.find((v) => v.id === t.variantId);
       if (!variant) throw new repo.Conflict('Tamanho/versão não pertence a este produto.');
-      const settings = repo.getSettings(db);
-      let unitCost: number | null = null;
-      const prev = existingId ? repo.getTransaction(db, existingId) : null;
+      const parts = (b: { ingredients: number; packaging: number; waste: number; labor: number; total: number }) => ({
+        unitCost: b.total,
+        unitMaterialCost: b.ingredients + b.packaging + b.waste,
+        unitLaborCost: b.labor,
+      });
+      let costs: { unitCost: number | null; unitMaterialCost: number | null; unitLaborCost: number | null };
       if (prev && prev.variantId === variant.id && prev.unitCost !== null) {
-        unitCost = prev.unitCost; // mantém o custo histórico da venda
+        // Mesma venda, mesmo produto: mantém os custos da época da venda.
+        costs = { unitCost: prev.unitCost, unitMaterialCost: prev.unitMaterialCost, unitLaborCost: prev.unitLaborCost };
+        if (costs.unitMaterialCost === null || costs.unitLaborCost === null) {
+          // Vendas registradas antes desta versão: completa com a melhor estimativa atual.
+          const { cost } = safeVariantCost(variant, calcCtx(db));
+          if (cost) {
+            const est = parts(cost.breakdown);
+            costs.unitMaterialCost ??= est.unitMaterialCost;
+            costs.unitLaborCost ??= est.unitLaborCost;
+          }
+        }
       } else {
         const { cost, error } = safeVariantCost(variant, calcCtx(db));
         if (error) throw new repo.Conflict(`Não foi possível calcular o custo do produto: ${error}`);
-        unitCost = cost!.breakdown.total;
+        costs = parts(cost!.breakdown);
       }
-      const fee = t.fee ?? feeFor(t.paymentMethod, t.amount, settings);
-      if (fee > t.amount) throw new repo.Conflict('A taxa não pode ser maior que o valor da venda.');
       return {
         ...base,
         description: t.description || `${product.name} · ${variant.name}`,
@@ -314,7 +364,8 @@ export function createApi(db: DB): (req: ApiRequest) => ApiResponse {
         productId: product.id,
         variantId: variant.id,
         quantity: t.quantity,
-        unitCost,
+        ...costs,
+        tax,
       };
     }
     if (category === 'compra_ingrediente') {
@@ -331,36 +382,37 @@ export function createApi(db: DB): (req: ApiRequest) => ApiResponse {
   };
 
   /**
-   * Compra com "atualizar preço": a compra mais recente vira o preço atual do ingrediente.
-   * Compras com data anterior à última registrada entram só no histórico.
+   * Compra com "atualizar o preço": entra no histórico do ingrediente ligada ao lançamento,
+   * e o preço atual passa a ser o da compra mais recente (por data). Editar ou excluir o
+   * lançamento desfaz esse efeito.
    */
-  const applyIngredientUpdate = (body: unknown, t: repo.TxInput) => {
+  const applyPurchase = (body: unknown, txId: number, t: repo.TxInput) => {
     const parsed = txSchema.parse(body) as any;
     if (parsed.category !== 'compra_ingrediente' || !parsed.updateIngredient || !parsed.ingredientId) return;
-    const ing = repo.getIngredient(db, parsed.ingredientId);
-    const purchase = {
+    if (t.date > latestAllowedDate())
+      throw new repo.Conflict('Para atualizar o preço do ingrediente, a data da compra não pode ser no futuro.');
+    repo.linkPurchase(db, txId, parsed.ingredientId, {
       totalPrice: t.amount,
       packageSize: parsed.updateIngredient.packageSize,
       packs: parsed.updateIngredient.packs,
       unit: parsed.updateIngredient.unit,
-    };
-    if (t.date >= ing.lastPurchaseDate) {
-      repo.updateIngredient(db, ing.id, { ...ing, ...purchase, lastPurchaseDate: t.date });
-    } else {
-      repo.addPriceHistory(db, ing.id, { ...purchase, purchaseDate: t.date });
-    }
+      purchaseDate: t.date,
+    });
   };
 
   add('POST', '/transactions', (c) => {
     const t = buildTx(c.body);
-    applyIngredientUpdate(c.body, t);
-    return repo.createTransaction(db, t);
+    const created = repo.createTransaction(db, t);
+    applyPurchase(c.body, created.id, t);
+    return repo.getTransaction(db, created.id);
   }, 201);
   add('PUT', '/transactions/:id', (c) => {
     const txId = parseId(c.params.id);
     const t = buildTx(c.body, txId);
-    applyIngredientUpdate(c.body, t);
-    return repo.updateTransaction(db, txId, t);
+    repo.unlinkPurchase(db, txId);
+    repo.updateTransaction(db, txId, t);
+    applyPurchase(c.body, txId, t);
+    return repo.getTransaction(db, txId);
   });
   add('DELETE', '/transactions/:id', (c) => repo.deleteTransaction(db, parseId(c.params.id)));
 
@@ -369,6 +421,7 @@ export function createApi(db: DB): (req: ApiRequest) => ApiResponse {
     const from = isoDate.parse(c.query.from);
     const to = isoDate.parse(c.query.to);
     if (from > to) throw new repo.Conflict('A data inicial deve ser anterior à final.');
+    if (Date.parse(to) - Date.parse(from) > 10 * 366 * 864e5) throw new repo.Conflict('Escolha um período de até 10 anos.');
     const gran = z.enum(['day', 'week', 'month']).catch('day').parse(c.query.granularity);
     return buildDashboard(db, from, to, gran);
   });

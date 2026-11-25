@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Download, Plus, Trash2, Upload } from 'lucide-react';
 import { useStore } from '../lib/store.tsx';
 import { api } from '../lib/api.ts';
@@ -6,7 +6,8 @@ import { downloadBackup, downloadUnreadable, resetAllData, restoreBackup } from 
 import { hourlyRates, priceForMargin } from '../../shared/calc.ts';
 import type { Settings } from '../../shared/types.ts';
 import { date, money, parseNum, pct, toField } from '../lib/format.ts';
-import { Button, Card, Field, IconButton, Input, Notice, NumInput, PageHeader, Select, useFeedback } from '../components/ui.tsx';
+import { Button, Card, Field, IconButton, Input, Notice, NumInput, PageHeader, Select, useDirty, useFeedback } from '../components/ui.tsx';
+import { localISODate } from '../../shared/dates.ts';
 
 type NumKeys = { [K in keyof Settings]: Settings[K] extends number ? K : never }[keyof Settings];
 const NUM_KEYS: NumKeys[] = [
@@ -32,6 +33,18 @@ function SettingsForm({ settings }: { settings: Settings }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const set = (k: string, v: string) => setF((s) => ({ ...s, [k]: v }));
+  const dirty = useDirty(f);
+
+  // Avisa antes de fechar a página com alterações não salvas.
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [dirty]);
 
   const parsed: Settings = useMemo(() => {
     const nums = Object.fromEntries(NUM_KEYS.map((k) => [k, f[k].trim() === '' ? 0 : parseNum(f[k])])) as Record<NumKeys, number>;
@@ -171,6 +184,12 @@ function SettingsForm({ settings }: { settings: Settings }) {
           </Card>
         </aside>
       </div>
+      {dirty && (
+        <div className="sticky bottom-4 z-20 mt-6 flex flex-col gap-2 rounded-xl border border-line bg-surface p-3 shadow-[0_12px_32px_-8px_rgba(28,25,23,.25)] sm:flex-row sm:items-center sm:justify-between">
+          <span className="text-[13px] font-medium text-ink-2">Você tem alterações não salvas.</span>
+          <Button variant="primary" loading={saving} onClick={save}>Salvar configurações</Button>
+        </div>
+      )}
     </>
   );
 }
@@ -268,7 +287,7 @@ function DataCard() {
       <dl className="mb-3 space-y-1.5 text-[12.5px]">
         <div className="flex justify-between gap-3">
           <dt className="text-muted">Último backup</dt>
-          <dd className={storage.lastBackupAt ? 'text-ink' : 'text-warn'}>{storage.lastBackupAt ? date(storage.lastBackupAt.slice(0, 10)) : 'Nunca'}</dd>
+          <dd className={storage.lastBackupAt ? 'text-ink' : 'text-warn'}>{storage.lastBackupAt ? date(localISODate(new Date(storage.lastBackupAt))) : 'Nunca'}</dd>
         </div>
         {storage.persisted && (
           <div className="flex justify-between gap-3">
@@ -286,10 +305,12 @@ function DataCard() {
         </Button>
         <input ref={fileRef} type="file" accept=".json,.db,application/json" className="hidden" onChange={(e) => restore(e.target.files?.[0])} />
       </div>
-      <p className="mt-3 text-[11.5px] leading-relaxed text-muted">
-        Para usar em outro aparelho: faça o backup aqui e use “Restaurar backup” no outro. Faça backup com frequência: se o
-        navegador for limpo, os dados somem.
-      </p>
+      <ul className="mt-3 list-disc space-y-1 pl-4 text-[11.5px] leading-relaxed text-muted">
+        <li>Os dados ficam só neste navegador. Computador e celular não se sincronizam sozinhos: faça o backup num e use “Restaurar backup” no outro.</li>
+        <li>Limpar os dados do navegador (ou desinstalar o app) apaga tudo. Faça backup toda semana.</li>
+        <li>Em janela anônima, nada fica salvo ao fechar.</li>
+        <li>No iPhone, use pelo ícone da Tela de Início: no Safari, o iPhone pode apagar os dados após 7 dias sem uso, e o ícone guarda dados separados do Safari.</li>
+      </ul>
       <button className="mt-3 text-[12px] font-medium text-neg hover:underline disabled:opacity-50" onClick={reset} disabled={busy !== null}>
         Apagar todos os dados…
       </button>

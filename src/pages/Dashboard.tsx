@@ -10,6 +10,42 @@ import { usePricingRows } from './Pricing.tsx';
 import { Button, Card, cx, Empty, Notice, PageHeader, Stat, useFeedback } from '../components/ui.tsx';
 import { downloadBackup } from '../lib/db-client.ts';
 
+/** iPhone/iPad no Safari: os dados ficam mais seguros no app da Tela de Início. */
+function InstallTip() {
+  const { ingredients } = useStore();
+  const [hidden, setHidden] = useState(() => {
+    try {
+      return localStorage.getItem('doceria.installTip') === 'hide';
+    } catch {
+      return false;
+    }
+  });
+  if (typeof navigator === 'undefined' || hidden) return null;
+  const ios = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const standalone = matchMedia('(display-mode: standalone)').matches || (navigator as Navigator & { standalone?: boolean }).standalone === true;
+  if (!ios || standalone) return null;
+  return (
+    <Notice tone="warn" className="mb-5">
+      <b>No iPhone, use o sistema pela Tela de Início.</b> Toque em Compartilhar → “Adicionar à Tela de Início” e abra pelo
+      ícone. No Safari, o iPhone pode apagar os dados após 7 dias sem uso
+      {ingredients.length > 0 ? ', e o app da Tela de Início começa vazio: faça um backup aqui e restaure lá' : ''}.{' '}
+      <button
+        className="font-medium underline"
+        onClick={() => {
+          try {
+            localStorage.setItem('doceria.installTip', 'hide');
+          } catch {
+            /* ignorado */
+          }
+          setHidden(true);
+        }}
+      >
+        Entendi
+      </button>
+    </Notice>
+  );
+}
+
 function BackupReminder() {
   const { storage, ingredients, refreshStorage } = useStore();
   const { toast } = useFeedback();
@@ -49,7 +85,7 @@ function BackupReminder() {
 }
 
 export default function Dashboard() {
-  const { settings, ingredients, recipes, products, reload } = useStore();
+  const { settings, ingredients, recipes, products, reload, error: storeError } = useStore();
   const [period, setPeriod] = usePeriod();
   const { data, error, load } = useFinance(period.from, period.to, period.gran);
   const [selling, setSelling] = useState(false);
@@ -59,13 +95,15 @@ export default function Dashboard() {
     let acc = 0;
     return (data?.series ?? []).map((s) => {
       acc += s.saldo;
-      return { label: bucketLabel(s.bucket, period.gran), saldo: s.saldo, acumulado: acc };
+      return { label: bucketLabel(s.bucket, data!.period.granularity), saldo: s.saldo, acumulado: acc };
     });
-  }, [data, period.gran]);
+  }, [data]);
 
-  const losing = rows.filter((r) => r.pricing?.current?.belowMinimum);
-  const lowMargin = rows.filter((r) => r.pricing?.current && !r.pricing.current.belowMinimum && r.pricing.current.marginPct + 0.05 < r.pricing.marginPct);
-  const bestMargin = [...rows].filter((r) => r.pricing?.current).sort((a, b) => b.pricing!.current!.marginPct - a.pricing!.current!.marginPct).slice(0, 5);
+  // Só produtos ativos geram alertas.
+  const activeRows = rows.filter((r) => r.product.active);
+  const losing = activeRows.filter((r) => r.pricing?.current?.belowMinimum);
+  const lowMargin = activeRows.filter((r) => r.pricing?.current && !r.pricing.current.belowMinimum && r.pricing.current.marginPct + 0.05 < r.pricing.marginPct);
+  const bestMargin = [...activeRows].filter((r) => r.pricing?.current).sort((a, b) => b.pricing!.current!.marginPct - a.pricing!.current!.marginPct).slice(0, 5);
 
   const setupSteps = [
     { done: ingredients.length > 0, label: 'Cadastrar ingredientes e preços', to: '/ingredientes' },
@@ -85,7 +123,8 @@ export default function Dashboard() {
       />
 
       <BackupReminder />
-      {!setupDone && (
+      <InstallTip />
+      {!setupDone && !storeError && (
         <Card className="mb-5" title="Primeiros passos" subtitle="Siga a ordem: o sistema usa cada etapa para calcular a próxima.">
           <ol className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
             {setupSteps.map((s, i) => (
@@ -108,14 +147,18 @@ export default function Dashboard() {
       {t && (
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
           <Stat label="Faturamento" value={money(t.revenue)} hint={`${t.salesCount} venda(s) · ${number(t.unitsSold)} un`} />
-          <Stat label="Custos de produção" value={money(t.cogs)} hint={t.salesRevenue > 0 ? `${pct((t.cogs / t.salesRevenue) * 100)} do faturamento` : 'Custo dos produtos vendidos'} />
+          <Stat label="Custos de produção" value={money(t.cogs)} hint={t.salesRevenue > 0 ? `Ingredientes, embalagens e mão de obra · ${pct((t.cogs / t.salesRevenue) * 100)}` : 'Ingredientes, embalagens e mão de obra'} />
           <Stat label="Despesas" value={money(t.expenses + t.fees + t.taxes)} hint="Fixas, variáveis, taxas e impostos" />
-          <Stat label={t.estimatedProfit >= 0 ? 'Lucro líquido estimado' : 'Prejuízo estimado'} value={money(t.estimatedProfit)} tone={t.estimatedProfit >= 0 ? 'pos' : 'neg'} hint={t.revenue > 0 ? `Margem ${pct((t.estimatedProfit / t.revenue) * 100)}` : undefined} />
+          <Stat label={t.estimatedProfit >= 0 ? 'Lucro líquido estimado' : 'Prejuízo estimado'} value={money(t.estimatedProfit)} tone={t.estimatedProfit >= 0 ? 'pos' : 'neg'} hint={t.revenue > 0 ? `Margem ${pct((t.estimatedProfit / t.revenue) * 100)}` : 'Vendas − custos − despesas lançadas'} />
         </div>
       )}
 
       <div className="mt-4 grid gap-4 lg:grid-cols-3">
-        <Card title="Evolução financeira" subtitle="Saldo de caixa acumulado no período" className="lg:col-span-2">
+        <Card
+          title="Evolução financeira"
+          subtitle={`Saldo de caixa acumulado no período${data && data.period.granularity !== data.period.requestedGranularity ? ` (agrupado por ${data.period.granularity === 'week' ? 'semana' : 'mês'}: período longo)` : ''}`}
+          className="lg:col-span-2"
+        >
           {!data || chart.every((c) => c.saldo === 0) ? (
             <Empty title="Sem movimentação no período" description="Registre vendas e despesas no Financeiro." />
           ) : (
@@ -188,7 +231,7 @@ export default function Dashboard() {
         <Card title="Mais vendidos" subtitle="Quantidade no período" padded={false}>
           <RankList items={(data?.topSold ?? []).map((p) => ({ name: p.name, value: p.quantity, label: `${number(p.quantity)} un`, sub: money(p.revenue) }))} empty="Sem vendas no período." />
         </Card>
-        <Card title="Mais lucrativos" subtitle="Lucro real das vendas no período" padded={false}>
+        <Card title="Mais lucrativos" subtitle="Lucro das vendas com o custo completo" padded={false}>
           <RankList
             items={(data?.topProfitable ?? []).map((p) => ({ name: p.name, value: Math.max(p.profit, 0), label: money(p.profit), sub: p.revenue ? `margem ${pct((p.profit / p.revenue) * 100)}` : '', neg: p.profit < 0 }))}
             empty="Sem vendas no período."

@@ -14,7 +14,7 @@ npm install
 npm run package
 ```
 
-Isso gera `doceria-netlify.zip`. No Netlify, entre na sua conta, vá em **Sites → Add new site →
+Isso gera `doceria-netlify-vX.Y.Z.zip` (com a versão no nome; a versão também aparece no menu do sistema). No Netlify, entre na sua conta, vá em **Sites → Add new site →
 Deploy manually** e arraste o arquivo (ou a pasta `dist/`). Para atualizar depois, abra o site no
 Netlify → **Deploys** e arraste o novo arquivo.
 
@@ -57,7 +57,7 @@ Os minutos vêm do tempo de preparo das receitas (proporcional à fração usada
 
 ## Desenvolvimento
 
-Requer Node.js 20.11+.
+Requer Node.js 20.19+ (ou 22.12+).
 
 ```bash
 npm install
